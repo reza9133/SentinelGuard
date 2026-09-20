@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html {
+  scroll-behavior: smooth;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+body {
+  background-image: radial-gradient(circle at 1px 1px, rgba(109, 93, 245, 0.12) 1px, transparent 0);
+  background-size: 28px 28px;
+}
+
+::selection {
+  background: #6d5df5;
+  color: #fff;
+}
+
+/* Visible keyboard focus everywhere, styled to match the palette instead
+   of the browser default. */
+:focus-visible {
+  outline: 2px solid #6d5df5;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.glass {
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+.text-balance {
+  text-wrap: balance;
+}
+
+/* Thin scrollbar for evidence textareas / long content, kept subtle. */
+textarea::-webkit-scrollbar {
+  width: 8px;
+}
+textarea::-webkit-scrollbar-thumb {
+  background: rgba(109, 93, 245, 0.25);
+  border-radius: 8px;
+}

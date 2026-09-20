@@ -1,0 +1,14 @@
+# Python (contracts / deploy script)
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Deploy script output (contains account keys / deployment records)
+.env
+deployed.*.json
+
+# Editor / OS noise
+.DS_Store
+.vscode/

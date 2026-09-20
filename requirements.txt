@@ -1,0 +1,7 @@
+# Pick ONE of these depending on --network, then reinstall to switch:
+#
+#   --network studio-next  (chain 61997, consensus v0.6)
+genlayer-py==0.19.0rc2
+#
+#   --network studionet    (chain 61999, older consensus)
+# genlayer-py==0.18.*
