@@ -13,7 +13,7 @@ const NAV = [
 
 export default function Header({ wallet }) {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { address, connected, connecting, connect, disconnect } = wallet;
+  const { address, connected, connecting, connect, disconnect, wrongNetwork, switchNetwork } = wallet;
 
   return (
     <header className="sticky top-0 z-40 border-b border-black/5 bg-white/75 backdrop-blur-md">
@@ -38,7 +38,24 @@ export default function Header({ wallet }) {
         </nav>
 
         <div className="flex items-center gap-2">
-          {connected ? (
+          {wrongNetwork ? (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={switchNetwork}
+                className="flex items-center gap-2 rounded-full border border-pending-300 bg-pending-50 px-3.5 py-2 text-sm font-medium text-pending-900 transition-colors hover:bg-pending-100"
+                title="Wrong network - click to switch to Studionet"
+              >
+                <span className="h-2 w-2 rounded-full bg-pending-500" />
+                Wrong network — switch
+              </button>
+              <button
+                onClick={disconnect}
+                className="text-xs font-medium text-muted hover:text-halted-600"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : connected ? (
             <div className="group relative">
               <button
                 onClick={disconnect}
