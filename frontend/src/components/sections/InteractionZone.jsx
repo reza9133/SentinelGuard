@@ -106,7 +106,7 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
         {!connected && (
           <div className="mt-6 flex items-center justify-between gap-4 rounded-2xl border border-pending-300 bg-pending-50 px-5 py-3.5 text-sm text-pending-900">
             <span>Connect a wallet to submit a report or resume review.</span>
-            <Button size="sm" onClick={wallet.connect} disabled={wallet.connecting}>
+            <Button size="sm" onClick={wallet.openModal} disabled={wallet.connecting}>
               {wallet.connecting ? "Connecting…" : "Connect wallet"}
             </Button>
           </div>
