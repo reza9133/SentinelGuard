@@ -19,7 +19,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <Header wallet={wallet} />
+      <Header wallet={wallet} sentinel={sentinel} />
       <main>
         <Hero />
         <HowItWorks />
