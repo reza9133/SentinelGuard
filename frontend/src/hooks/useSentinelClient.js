@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { createClient } from "genlayer-js";
 import { CHAIN, NETWORK_NAME, CONTRACTS, IS_FEE_NETWORK } from "../config/network.js";
+import { getActiveProvider } from "../lib/eip6963.js";
 
 // Reads never need a wallet - one shared, account-free client for the whole
 // app, created once.
@@ -37,18 +38,26 @@ export function useSentinelClient(walletAddress) {
 
   useEffect(() => {
     let cancelled = false;
-    if (!walletAddress || typeof window === "undefined" || !window.ethereum) {
+    // Sign with whichever wallet the person picked in the wallet modal
+    // (falls back to window.ethereum when nothing was explicitly picked).
+    const provider = getActiveProvider();
+    if (!walletAddress || !provider) {
       setWriteClient(null);
       return undefined;
     }
     (async () => {
-      const client = createClient({
-        chain: CHAIN,
-        account: walletAddress,
-        provider: window.ethereum,
-      });
-      await client.connect(NETWORK_NAME);
-      if (!cancelled) setWriteClient(client);
+      try {
+        const client = createClient({
+          chain: CHAIN,
+          account: walletAddress,
+          provider,
+        });
+        await client.connect(NETWORK_NAME);
+        if (!cancelled) setWriteClient(client);
+      } catch (err) {
+        console.error("Failed to create the wallet client:", err);
+        if (!cancelled) setWriteClient(null);
+      }
     })();
     return () => {
       cancelled = true;
