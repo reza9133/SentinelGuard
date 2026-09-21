@@ -5,8 +5,7 @@ import { LINKS, BUILDER_NAME } from "../../config/network.js";
 
 export default function Footer() {
   return (
-    <footer className="relative border-t border-black/5 bg-white">
-      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-chain-300 to-transparent" />
+    <footer className="border-t border-black/5 bg-white">
       <div className="mx-auto max-w-6xl px-5 py-12">
         <div className="flex flex-col gap-8 md:flex-row md:items-start md:justify-between">
           <div className="max-w-sm">
