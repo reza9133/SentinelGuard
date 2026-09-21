@@ -1,3 +1,4 @@
+import { motion } from "framer-motion";
 import GlassCard from "../ui/GlassCard.jsx";
 
 const FEATURES = [
@@ -17,7 +18,12 @@ export default function About() {
   return (
     <section id="about" className="py-24">
       <div className="mx-auto grid max-w-6xl gap-14 px-5 lg:grid-cols-[0.9fr_1.1fr] lg:items-start">
-        <div>
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: "-80px" }}
+          transition={{ duration: 0.5 }}
+        >
           <h2 className="font-display text-3xl font-semibold tracking-tight text-ink sm:text-4xl">
             Built for GenLayer's Autonomous Protocols track
           </h2>
@@ -37,14 +43,22 @@ export default function About() {
             bar — is pure deterministic bookkeeping. No human, no committee,
             no proposal ever enters the loop.
           </p>
-        </div>
+        </motion.div>
 
         <div className="grid gap-5 sm:grid-cols-2">
-          {FEATURES.map((f) => (
-            <GlassCard key={f.title} className="p-6">
-              <h3 className="font-display text-[15px] font-semibold text-chain-600">{f.title}</h3>
-              <p className="mt-2.5 text-sm leading-relaxed text-muted">{f.body}</p>
-            </GlassCard>
+          {FEATURES.map((f, i) => (
+            <motion.div
+              key={f.title}
+              initial={{ opacity: 0, y: 16 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ duration: 0.4, delay: i * 0.08 }}
+            >
+              <GlassCard className="h-full p-6 transition-shadow hover:shadow-lift">
+                <h3 className="font-display text-[15px] font-semibold text-chain-600">{f.title}</h3>
+                <p className="mt-2.5 text-sm leading-relaxed text-muted">{f.body}</p>
+              </GlassCard>
+            </motion.div>
           ))}
         </div>
       </div>
