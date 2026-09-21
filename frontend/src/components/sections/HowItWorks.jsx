@@ -1,5 +1,3 @@
-import { motion } from "framer-motion";
-
 const STEPS = [
   {
     n: "01",
@@ -39,21 +37,14 @@ export default function HowItWorks() {
 
         <div className="relative mt-14 grid gap-x-6 gap-y-10 lg:grid-cols-4">
           <div className="absolute left-0 right-0 top-6 hidden h-px bg-gradient-to-r from-chain-300 via-compute-300 to-transparent lg:block" />
-          {STEPS.map((step, i) => (
-            <motion.div
-              key={step.n}
-              initial={{ opacity: 0, y: 16 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-60px" }}
-              transition={{ duration: 0.4, delay: i * 0.12 }}
-              className="relative"
-            >
-              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-chain-300/70 bg-chain-50 font-display text-sm font-semibold text-chain-600 transition-transform hover:scale-105">
+          {STEPS.map((step) => (
+            <div key={step.n} className="relative">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-chain-300/70 bg-chain-50 font-display text-sm font-semibold text-chain-600">
                 {step.n}
               </div>
               <h3 className="mt-4 text-[15px] font-semibold text-ink">{step.title}</h3>
               <p className="mt-2 text-sm leading-relaxed text-muted">{step.body}</p>
-            </motion.div>
+            </div>
           ))}
         </div>
       </div>

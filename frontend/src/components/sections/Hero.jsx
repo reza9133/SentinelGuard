@@ -1,6 +1,5 @@
 import { motion } from "framer-motion";
 import Button from "../ui/Button.jsx";
-import GenLayerMark from "../icons/GenLayerMark.jsx";
 import { LINKS } from "../../config/network.js";
 
 const NODES = [
@@ -16,7 +15,6 @@ const SHIELD_CENTER = { x: 165, y: 130 };
 export default function Hero() {
   return (
     <section id="top" className="relative overflow-hidden pt-16 sm:pt-20">
-      <GradientBlobs />
       <div className="mx-auto grid max-w-6xl items-center gap-14 px-5 pb-20 lg:grid-cols-[1.05fr_0.95fr] lg:pb-28">
         <motion.div
           initial="hidden"
@@ -27,9 +25,7 @@ export default function Hero() {
             variants={{ hidden: { opacity: 0, y: 8 }, show: { opacity: 1, y: 0 } }}
             className="inline-flex items-center gap-2 rounded-full border border-chain-300/60 bg-chain-50 px-3 py-1 text-xs font-medium text-chain-600"
           >
-            <GenLayerMark size={13} className="!gap-1" />
-            <span className="opacity-40">·</span>
-            Autonomous Protocols track
+            GenLayer · Autonomous Protocols track
           </motion.span>
 
           <motion.h1
@@ -83,28 +79,6 @@ function Metric({ label, value }) {
     <div>
       <div className="font-display text-lg font-semibold text-ink">{value}</div>
       <div>{label}</div>
-    </div>
-  );
-}
-
-/**
- * Two soft, slowly-drifting gradient fields behind the hero content. Pure
- * decoration - aria-hidden, pointer-events-none, ignored by scroll reveals
- * elsewhere so it never competes with the content for attention.
- */
-function GradientBlobs() {
-  return (
-    <div aria-hidden className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
-      <motion.div
-        className="absolute -left-24 -top-24 h-[26rem] w-[26rem] rounded-full bg-chain-300/30 blur-[90px]"
-        animate={{ x: [0, 30, 0], y: [0, 20, 0] }}
-        transition={{ repeat: Infinity, duration: 16, ease: "easeInOut" }}
-      />
-      <motion.div
-        className="absolute -right-32 top-10 h-[30rem] w-[30rem] rounded-full bg-compute-300/25 blur-[100px]"
-        animate={{ x: [0, -25, 0], y: [0, 30, 0] }}
-        transition={{ repeat: Infinity, duration: 20, ease: "easeInOut", delay: 1 }}
-      />
     </div>
   );
 }
