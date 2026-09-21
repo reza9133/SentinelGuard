@@ -1,15 +1,15 @@
+import genlayerLogo from "../../assets/genlayer-logo.png";
+
 /**
- * A stylized text rendering of "GenLayer", used to credit the network this
- * app is built on. Deliberately typographic rather than a reproduction of
- * any official logo asset.
+ * The real GenLayer mark, credited alongside "GenLayer" text wherever the
+ * app needs to say "built on GenLayer" (footer, header). Kept in its
+ * original black - it's a wordmark/brand asset, not a UI accent, so it
+ * isn't recolored to match the app's own violet/blue palette.
  */
-export default function GenLayerMark({ className = "" }) {
+export default function GenLayerMark({ className = "", size = 16 }) {
   return (
     <span className={`inline-flex items-center gap-1.5 font-display font-semibold ${className}`}>
-      <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
-        <circle cx="7" cy="7" r="6.25" stroke="#6D5DF5" strokeWidth="1.5" />
-        <circle cx="7" cy="7" r="2.4" fill="#6D5DF5" />
-      </svg>
+      <img src={genlayerLogo} alt="" width={size} height={size} className="shrink-0" />
       <span className="tracking-tight">
         Gen<span className="text-chain-500">Layer</span>
       </span>
