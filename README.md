@@ -57,39 +57,50 @@ sequenceDiagram
     autonumber
     actor R as Reporter
     participant S as SentinelGuard
-    participant V as Validators (LLM consensus)
     participant T as Target contract
+    participant V as Validators (LLM consensus)
 
-    Note over T,S: Target registered once with its plain-language rulebook
+    Note over T,S: Target registered with target authorization or target-controlled reclaim path
     R->>S: report_incident(target, evidence) + GEN bond
-    S->>V: rulebook + evidence (fenced as data, never as instructions)
-    V-->>S: decision + confidence (label must match, score within ±12)
-    alt decision = yes AND confidence ≥ target's bar
-        S->>T: sentinel_pause()
+    S->>T: Fetch authenticated target observation (view call on-chain)
+    T-->>S: Return authenticated state (paused, balance, etc.)
+    S->>V: rulebook + authenticated observation + evidence
+    V-->>S: decision + confidence (validators MUST agree on thresholded action)
+    alt decision = yes AND confidence ≥ target's bar (halt action agreed)
+        alt target is pausable
+            Note over S: status becomes "pausing" (guardian status does NOT change yet)
+            S->)T: sentinel_pause() [on="finalized"]
+            T->)S: confirm_pause() / verify_target_hook()
+            Note over S: status changes to "halted" ONLY after verified (or reconciles to active on failure)
+        else target is read-only
+            Note over S: status changes to "halted" immediately
+        end
         S-->>R: bond refunded, trust +5
-    else decision = yes but below the bar (near-miss)
+    else decision = yes but below the bar (near-miss agreed)
         Note over S: bond forfeited, near-miss count +1
-    else decision = no or uncertain (false alarm)
+    else decision = no or uncertain (false alarm agreed)
         Note over S: bond forfeited, trust −3, false-alarm count +1
     end
 ```
 
-A target's life is a two-state machine, and both transitions go through consensus:
+A target's life is managed through safe transitions with hook verification and failure reconciliation:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Active: register_target
-    Active --> Halted: report_incident clears the confidence bar
-    Halted --> Active: request_resume_review clears the resume bar
-    note right of Halted
-        Resume is blocked for 5 minutes after a halt.
-        A successful resume tightens the bar by 5 points.
-    end note
+    [*] --> Active: register_target (authorized / reclaimable)
+    Active --> Pausing: consensus agrees on halt (pausable target)
+    Active --> Halted: consensus agrees on halt (read-only target)
+    Pausing --> Halted: finalized pause hook verified
+    Pausing --> Active: hook failed (reconciled on failure)
+    Halted --> Resuming: consensus agrees on resume (pausable target)
+    Halted --> Active: consensus agrees on resume (read-only target)
+    Resuming --> Active: finalized resume hook verified
+    Resuming --> Halted: hook failed (reconciled on failure)
 ```
 
 **The important split:** the *only* non-deterministic step is the LLM verdict, and even
-that is settled by validator consensus, not by any single model. Everything after the
-verdict — pausing the target, refunding or forfeiting the bond, nudging the bar,
+that is settled by validator consensus requiring agreement on the thresholded action. Everything after the
+verdict — verifying the target hook, refunding or forfeiting the bond, nudging the bar,
 adjusting trust — is plain deterministic bookkeeping.
 
 ## 🎛️ It tunes itself
@@ -117,13 +128,15 @@ from unlimited addresses and walk the bar to its ceiling at zero cost — so tha
 | Threat | Defense |
 |---|---|
 | **Sybil spam to push the bar around** (either direction) | Every report is **payable**. The bond (default **2 GEN**) is refunded *only* when the report actually halts / resumes. Everything else — including a near-miss — forfeits it to the treasury. |
+| **Unsubstantiated or fake evidence spam** | **Authenticated target observations**: SentinelGuard queries the target contract's actual on-chain state synchronously before calling consensus; evidence is evaluated directly against authenticated target observations. |
+| **Validators disagreeing across the action threshold** | **Thresholded action agreement**: Validators must agree on the actual action (halt vs no-halt). If one validator scores above the bar (e.g. 71 with bar 70) and another scores below (e.g. 69), consensus rejects even if the numeric difference is within tolerance. |
+| **Target hijacking or unauthorized rulebook control** | **Target authorization & reclaim path**: Registration requires target authorization, and the target contract (or its verified owner) always retains an unconditional reclaim path (`reclaim_target_control`) to override or replace the controller. |
+| **Silent pause/resume hook failures** | **Finalized hook verification & failure reconciliation**: Guardian status changes to `halted` or `active` only after the finalized hook is verified on-chain. If the hook fails or reverts, status is reconciled back on failure. |
 | **Low-quality repeat reporters** | On-chain **reporter trust** (starts at 50). False alarms cost trust; under 10 you can't report. |
 | **Prompt injection through evidence or rulebook** | Untrusted text is neutralised (`<` `>` replaced) before entering the prompt, the prompt states that everything inside the markers is *data*, and the model must answer in strict JSON that is validated field by field. |
-| **Validator LLMs disagreeing by a few points** | The decision label (`yes` / `no` / `uncertain`) must match **exactly**; only the numeric confidence gets a **±12** tolerance. Without it nearly every report would end undetermined. |
 | **Malformed model output** | One automatic retry, then a typed `[LLM_ERROR]` — never silently turned into a business decision. |
-| **A target rewriting its rules to dodge a live incident** | `update_rulebook` is registrar-only and **blocked while the target is halted**. |
+| **A target rewriting its rules to dodge a live incident** | `update_rulebook` is authorized-only and **blocked while the target is halted or in verification**. |
 | **Premature un-halting** | 5-minute resume cooldown, plus a separate prompt that must see evidence the *specific* original problem is gone. |
-| **Forcing state changes on other contracts** | Impossible by design — targets **opt in** with hooks that only accept calls from SentinelGuard's address (see below). |
 
 The owner's powers are deliberately narrow: tune the bond amount and sweep forfeited
 bonds from the treasury. The owner **cannot** change any adjudication outcome.
@@ -134,16 +147,19 @@ bonds from the treasury. The owner **cannot** change any adjudication outcome.
 
 | Method | Who | What it does |
 |---|---|---|
-| `register_target(target, rulebook, pausable)` | anyone | Registers a contract with a 20–1000 char rulebook. `pausable=True` promises the `sentinel_*` hooks exist. |
-| `update_rulebook(target, rulebook)` | registrar, only while active | Replaces the rulebook. |
-| `report_incident(target, evidence)` 💰 | anyone (trust ≥ 10) | Bond + evidence (≤ 2000 chars) → consensus verdict → halt / near-miss / false alarm. |
-| `request_resume_review(target, evidence)` 💰 | anyone, after cooldown | Evidence the problem is resolved → consensus verdict → resume or forfeit. |
+| `register_target(target, rulebook, pausable)` | target / authorized registrar | Registers a contract with a 20–1000 char rulebook. Requires target authorization or provisions target-controlled reclaim path. |
+| `update_rulebook(target, rulebook)` | target or controller | Replaces the rulebook while active. Blocked during halt or verification. |
+| `reclaim_target_control(target, new_controller)` | target contract / target owner | Target-controlled reclaim path to reclaim registrar authority and rulebook control at any time. |
+| `report_incident(target, evidence)` 💰 | anyone (trust ≥ 10) | Bond + evidence → checks authenticated target observation → consensus on thresholded action → transitions to pausing / halted. |
+| `request_resume_review(target, evidence)` 💰 | anyone, after cooldown | Evidence → checks authenticated observation → consensus on thresholded action → transitions to resuming / active. |
+| `verify_target_hook(target)` | anyone | Verifies finalized pause or resume hook on-chain; transitions guardian status or reconciles on failure. |
+| `confirm_pause(target)` / `confirm_resume(target)` | target contract | Finalized callback emitted by target contract upon hook execution. |
 | `set_incident_bond(amount)` | owner | Tunes the required bond. |
 | `withdraw_treasury(to, amount)` | owner | Sweeps forfeited bonds. |
 
 **Reads** (all free, all work without a wallet)
 
-`status(target)` · `get_target(target)` · `list_targets(n)` · `get_incident(id)` ·
+`status(target)` (`"active"` \| `"halted"` \| `"pausing"` \| `"resuming"`) · `get_target(target)` · `list_targets(n)` · `get_incident(id)` ·
 `recent_incidents(n)` · `reporter_trust(address)` · `incident_bond_amount()` ·
 `treasury_balance()` · `stats()`
 
@@ -153,14 +169,16 @@ bonds from the treasury. The owner **cannot** change any adjudication outcome.
 
 ## 🔌 Make your contract guardable
 
-A target needs exactly three things (see [`contracts/demo_vault.py`](contracts/demo_vault.py)):
+A target contract opts in with authenticated observations, authorization, and hooks (see [`contracts/demo_vault.py`](contracts/demo_vault.py)):
 
 ```python
 class MyProtocol(gl.Contract):
+    owner: Address
     sentinel: Address          # 1. SentinelGuard's address, set at deploy time
     paused: bool
 
     def __init__(self, sentinel: str):
+        self.owner = gl.message.sender_address
         self.sentinel = Address(sentinel)
         self.paused = False
 
@@ -168,17 +186,31 @@ class MyProtocol(gl.Contract):
         if gl.message.sender_address != self.sentinel:
             raise gl.vm.UserError("[EXPECTED] not sentinel")
 
+    @gl.public.view
+    def sentinel_observe(self) -> str:     # 2. Authenticated target observation
+        return json.dumps({"target": gl.message.contract_address.as_hex, "is_paused": self.paused})
+
+    @gl.public.view
+    def is_sentinel_authorized(self, addr: str) -> bool:  # 3. Target authorization
+        return Address(addr) == self.owner or Address(addr) == self.sentinel
+
     @gl.public.write
-    def sentinel_pause(self) -> None:      # 2. only SentinelGuard may pause…
+    def sentinel_pause(self) -> None:      # 4. Only SentinelGuard may pause…
         self._require_sentinel()
         self.paused = True
+        gl.get_contract_at(self.sentinel).emit(on="finalized").confirm_pause(
+            gl.message.contract_address.as_hex
+        )
 
     @gl.public.write
-    def sentinel_resume(self) -> None:     # 3. …and only SentinelGuard may resume
+    def sentinel_resume(self) -> None:     # 5. …and only SentinelGuard may resume
         self._require_sentinel()
         self.paused = False
+        gl.get_contract_at(self.sentinel).emit(on="finalized").confirm_resume(
+            gl.message.contract_address.as_hex
+        )
 
-    # every state-changing method then starts with:  if self.paused: raise …
+    # Every state-changing method starts with: if self.paused: raise ...
 ```
 
 Then call `register_target(address, rulebook, True)`. Not pausable? Register with
@@ -198,8 +230,8 @@ registering a contract you don't control gives you no power over it.
 
 | Contract | Address |
 |---|---|
-| **SentinelGuard** | `0xdF396341809A2A3d1A4E1149D14FBdB5856BCD2E` |
-| **DemoVault** | `0x5e04809a896C5e04D97406b955a9bFf725230239` |
+| **SentinelGuard** | `0x58c4b25782270bb952ED818B3529549D1A5659aB` |
+| **DemoVault** | `0x1bE955c661803c9eDB992e79Ab2cb1fe967a3fC8` |
 
 ### Run the frontend
 
