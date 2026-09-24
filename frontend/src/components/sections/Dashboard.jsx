@@ -103,7 +103,23 @@ function TargetCard({ target, index, selected, onSelect }) {
         }`}
       >
         <div className="flex items-center justify-between">
-          <Badge tone={halted ? "halted" : "active"}>{halted ? "Halted" : "Active"}</Badge>
+          <Badge
+            tone={
+              target.status === "halted"
+                ? "halted"
+                : target.status === "active"
+                ? "active"
+                : "pending"
+            }
+          >
+            {target.status === "halted"
+              ? "Halted"
+              : target.status === "active"
+              ? "Active"
+              : target.status === "pausing"
+              ? "Pausing"
+              : "Resuming"}
+          </Badge>
           <span className="font-mono text-xs text-muted">{shortAddress(target.address)}</span>
         </div>
 

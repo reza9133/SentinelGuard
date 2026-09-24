@@ -16,6 +16,7 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
   const [detailError, setDetailError] = useState(null);
   const [loadingDetail, setLoadingDetail] = useState(true);
   const [bondWei, setBondWei] = useState(null);
+  const [verifyingHook, setVerifyingHook] = useState(false);
 
   const [evidence, setEvidence] = useState("");
   const [resumeEvidence, setResumeEvidence] = useState("");
@@ -61,6 +62,28 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
   const connected = wallet.connected;
   const halted = detail?.status === "halted";
   const active = detail?.status === "active";
+  const pausing = detail?.status === "pausing";
+  const resuming = detail?.status === "resuming";
+
+  async function handleVerifyHook() {
+    if (!connected) return;
+    setVerifyingHook(true);
+    try {
+      await sentinel.verifyTargetHook(targetInput);
+      const verifiedState = await sentinel.verifyTargetState(targetInput);
+      setTx({
+        status: "success",
+        kind: "verify_hook",
+        targetState: verifiedState,
+        refreshedAt: Date.now(),
+      });
+      onChainChanged?.();
+    } catch (err) {
+      setTx({ status: "error", kind: "verify_hook", message: err.message || "Verification failed." });
+    } finally {
+      setVerifyingHook(false);
+    }
+  }
 
   async function runSubmit(kind, evidenceText, method) {
     if (!connected) {
@@ -77,10 +100,14 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
     }
     setTx({ status: "pending", kind });
     try {
-      await method(targetInput, evidenceText.trim(), bondWei);
-      const incidents = await sentinel.recentIncidents(1);
-      const latest = incidents?.[0] ?? null;
-      setTx({ status: "success", kind, incident: latest, refreshedAt: Date.now() });
+      const res = await method(targetInput, evidenceText.trim(), bondWei);
+      setTx({
+        status: "success",
+        kind,
+        incident: res.incident,
+        targetState: res.targetState,
+        refreshedAt: Date.now(),
+      });
       onChainChanged?.();
       if (kind === "report") setEvidence("");
       else setResumeEvidence("");
@@ -98,8 +125,8 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
           </h2>
           <p className="mt-2 text-muted">
             Pick a registered contract, then report an incident or — once it's
-            halted — request a resume review. Every call goes through the
-            same validator consensus SentinelGuard uses to decide anything.
+            halted — request a resume review. Every report is checked against
+            authenticated on-chain target observations and validated by consensus.
           </p>
         </div>
 
@@ -150,13 +177,47 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
               {!loadingDetail && detail && (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted">Status</span>
-                    <Badge tone={halted ? "halted" : "active"}>{halted ? "Halted" : "Active"}</Badge>
+                    <span className="text-sm text-muted">Guardian status</span>
+                    <Badge
+                      tone={
+                        halted
+                          ? "halted"
+                          : active
+                          ? "active"
+                          : "pending"
+                      }
+                    >
+                      {halted
+                        ? "Halted"
+                        : active
+                        ? "Active"
+                        : pausing
+                        ? "Pausing (Verifying Hook)"
+                        : "Resuming (Verifying Hook)"}
+                    </Badge>
                   </div>
+
+                  {(pausing || resuming) && (
+                    <div className="rounded-xl border border-pending-300 bg-pending-50 p-3 text-xs text-pending-900">
+                      <p className="font-medium">Finalized hook in-flight.</p>
+                      <p className="mt-1 opacity-80">
+                        Guardian status changes only after finalized hook is verified or reconciled on failure.
+                      </p>
+                      {connected && (
+                        <div className="mt-2">
+                          <Button size="xs" onClick={handleVerifyHook} disabled={verifyingHook}>
+                            {verifyingHook ? "Verifying…" : "Verify / Reconcile Hook"}
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <Stat label="Confidence bar" value={`${detail.confidence_bar}/100`} />
                   <Stat label="Resume bar" value={`${detail.resume_bar}/100`} />
                   <Stat label="Incidents so far" value={detail.incident_count} />
-                  <Stat label="Pausable" value={detail.pausable ? "Yes" : "Read-only flag"} />
+                  <Stat label="Pausable" value={detail.pausable ? "Yes (Hook guarded)" : "Read-only flag"} />
+                  <Stat label="Target authorization" value={detail.target_authorized ? "Authorized" : "Target-controlled reclaim"} />
                   {halted && detail.last_incident_reason && (
                     <div>
                       <span className="text-xs font-medium uppercase tracking-wide text-muted">
@@ -176,10 +237,14 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
               title="Report an incident"
               disabled={!active}
               disabledReason={
-                halted ? "This target is already halted." : "Load a registered, active target first."
+                halted
+                  ? "This target is already halted."
+                  : pausing || resuming
+                  ? "Target is pending hook verification."
+                  : "Load a registered, active target first."
               }
               bondGen={bondGen}
-              bondNote="Refunded in full if the report triggers a halt. Forfeited to the treasury on no-action, uncertain, or a near-miss under the bar."
+              bondNote="Checked against authenticated target observations. Refunded if the report triggers a halt. Forfeited to treasury otherwise."
               value={evidence}
               onChange={setEvidence}
               maxLength={MAX_EVIDENCE}
@@ -194,7 +259,7 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
               disabled={!halted}
               disabledReason="Only available once this target is halted."
               bondGen={bondGen}
-              bondNote="Refunded in full if the target is resumed. Forfeited to the treasury on no-action or uncertain."
+              bondNote="Checked against authenticated target observations. Refunded if the target is resumed. Forfeited to treasury otherwise."
               value={resumeEvidence}
               onChange={setResumeEvidence}
               maxLength={MAX_EVIDENCE}
@@ -299,8 +364,16 @@ function TxStatus({ tx }) {
           exit={{ opacity: 0 }}
           className="rounded-2xl border border-active-300 bg-active-50 px-5 py-4 text-sm text-active-900"
         >
-          <p className="font-medium">Consensus reached.</p>
-          {tx.incident ? (
+          <div className="flex items-center justify-between">
+            <p className="font-medium">Consensus reached.</p>
+            {tx.incident?.id && (
+              <span className="font-mono text-xs font-semibold text-active-900/70">
+                Correlated incident: #{tx.incident.id}
+              </span>
+            )}
+          </div>
+
+          {tx.incident && (
             <div className="mt-2 space-y-1">
               <p>
                 Decision:{" "}
@@ -311,8 +384,24 @@ function TxStatus({ tx }) {
               <p className="text-active-900/80">Confidence: {tx.incident.confidence}/100</p>
               {tx.incident.reason && <p className="text-active-900/80">"{tx.incident.reason}"</p>}
             </div>
-          ) : (
-            <p className="mt-1 text-active-900/80">Refresh the target panel above to see the outcome.</p>
+          )}
+
+          {tx.targetState && (
+            <div className="mt-3 rounded-xl border border-active-300/50 bg-white/60 p-3 text-xs">
+              <span className="font-semibold uppercase tracking-wide text-active-900">
+                Verified target state
+              </span>
+              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-active-900/90">
+                <span>Target is_paused: <strong>{tx.targetState.targetIsPaused === true ? "True" : tx.targetState.targetIsPaused === false ? "False" : "Unspecified"}</strong></span>
+                <span>Guardian status: <strong>{tx.targetState.guardianStatus}</strong></span>
+                <span>Consistency: <strong>{tx.targetState.isConsistent ? "Verified consistent" : "Needs reconciliation"}</strong></span>
+              </div>
+              {tx.targetState.reconciled && (
+                <p className="mt-1 text-xs font-medium text-chain-600">
+                  Hook status reconciled on-chain.
+                </p>
+              )}
+            </div>
           )}
         </motion.div>
       )}

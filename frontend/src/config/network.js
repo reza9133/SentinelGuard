@@ -21,8 +21,8 @@ export const NETWORK_NAME = "studionet";
 export const IS_FEE_NETWORK = false;
 
 export const CONTRACTS = {
-  sentinelGuard: "0xdF396341809A2A3d1A4E1149D14FBdB5856BCD2E",
-  demoVault: "0x5e04809a896C5e04D97406b955a9bFf725230239",
+  sentinelGuard: "0x58c4b25782270bb952ED818B3529549D1A5659aB",
+  demoVault: "0x1bE955c661803c9eDB992e79Ab2cb1fe967a3fC8",
 };
 
 export const LINKS = {
