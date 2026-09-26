@@ -8,27 +8,28 @@ voting, it belongs here.")
 
 What it does
 ------------
-1. Contracts register with SentinelGuard under target authorization or with a
-   target-controlled reclaim path, declaring plain-language invariants
-   ("no single withdrawal exceeds 10% of TVL", "oracle price may not move
-   more than 5% between reads", etc). Target contracts can reclaim control or
-   update their rulebook at any time.
+1. Registration and rulebook control. A caller that the TARGET authorizes (the
+   target itself, its owner()/get_owner()/owner_address(), or anyone the target's
+   is_sentinel_authorized() approves) may register the target as pausable.
+   Anyone else may only register a read-only flag (pausable=False), flagged
+   target_authorized=False, and the target can take control back at any time via
+   reclaim_target_control / set_pausable / update_rulebook.
 
-2. Anyone can report an incident with evidence. SentinelGuard fetches an
-   authenticated target observation directly from the target contract on-chain,
-   and validator LLMs evaluate the evidence together with the authenticated
-   observation against the rulebook. Validators must agree on the thresholded
-   action (both must agree to cross or stay below the bar).
+2. Anyone can report an incident with evidence. SentinelGuard reads an
+   observation directly from the target contract (fail-closed: no observation,
+   no report) and validator LLMs judge the evidence against it. Validators must
+   agree on the thresholded action, not just on a similar score.
 
-3. If consensus approves a halt on a pausable target, guardian status does NOT
-   change immediately: the target enters a pending verification state while the
-   finalized hook executes. Guardian status changes to halted only after the
-   finalized hook is verified, or reconciles back to active on failure.
+3. If consensus approves a halt/resume on a pausable target, guardian status
+   does NOT change: the target enters PAUSING/RESUMING while the FINALIZED hook
+   is pending. It becomes HALTED/ACTIVE only when the target's state confirms the
+   hook (verify_target_hook or the target's own confirm_* callback). A hook that
+   has not shown up after a grace period longer than the finality window is
+   reconciled as failed (PAUSING -> ACTIVE, RESUMING -> HALTED). Reconciling
+   before that grace period is refused, because the finalized message has simply
+   not executed yet.
 
 4. Self-tuning confidence bar drifts deterministically based on outcomes.
-
-5. Resume reviews follow the same authenticated observation, thresholded-action
-   agreement, and finalized hook verification / failure reconciliation path.
 """
 
 import datetime
@@ -85,6 +86,16 @@ TRUST_LOSS = 3
 TRUST_CEILING = 100
 
 RESUME_COOLDOWN_SECONDS = 300  # minimum time halted before a resume review can run
+
+# Finalized messages only run once the appeal window has closed, so a hook that
+# has not executed yet is NOT a failed hook. Reconciliation is only allowed after
+# this grace period. Owner-tunable within bounds because the window is a network
+# parameter.
+HOOK_GRACE_DEFAULT = 3600
+HOOK_GRACE_MIN = 300
+HOOK_GRACE_MAX = 7 * 86400
+
+MAX_OBSERVATION = 4000
 
 # Different validator LLMs (GPT, Gemini, Sonnet, ...) score the same
 # evidence a few points apart even when they agree on the substance.
@@ -207,7 +218,7 @@ def _parse_decision(raw) -> dict:
         raise gl.vm.UserError(L + "bad decision")
 
     conf = parsed.get("confidence", -1)
-    if not isinstance(conf, int) or conf < 0 or conf > 100:
+    if isinstance(conf, bool) or not isinstance(conf, int) or conf < 0 or conf > 100:
         raise gl.vm.UserError(L + "bad confidence")
 
     reason = str(parsed.get("reason", ""))[:MAX_REASON]
@@ -230,6 +241,20 @@ def _same_error(leader_message: str, mine: str) -> bool:
     return False
 
 
+def _valid_result(result) -> bool:
+    """Shape check applied by validators to the leader's proposal."""
+    if not isinstance(result, dict):
+        return False
+    decision = result.get("decision")
+    if not isinstance(decision, str) or decision not in CODES:
+        return False
+    conf = result.get("confidence")
+    if isinstance(conf, bool) or not isinstance(conf, int) or conf < 0 or conf > 100:
+        return False
+    reason = result.get("reason", "")
+    return isinstance(reason, str) and len(reason) <= MAX_REASON
+
+
 def _matches_action(mine: dict, theirs: dict, threshold: int) -> bool:
     """
     Validators must agree on:
@@ -249,41 +274,83 @@ def _matches_action(mine: dict, theirs: dict, threshold: int) -> bool:
     return my_action == their_action
 
 
+def _read_paused(addr: Address) -> int:
+    """1 = paused, 0 = running, -1 = the target's pause state could not be read."""
+    view = gl.get_contract_at(addr).view()
+    for name in ("is_paused", "sentinel_is_paused"):
+        try:
+            value = getattr(view, name)()
+        except Exception:
+            continue
+        if isinstance(value, bool):
+            return 1 if value else 0
+    return -1
+
+
 def _fetch_target_observation(addr: Address) -> str:
     """
-    Fetches authenticated on-chain state observation directly from target contract.
-    Synchronously queries the target contract via view call.
+    Reads the target's own state on-chain and wraps it with provenance the
+    GUARD supplies (target address, which method answered, when). Fails closed:
+    a target that exposes no readable state cannot be reported on, because the
+    evidence could then only be judged against itself.
     """
-    target_contract = gl.get_contract_at(addr)
-    # 1. Try sentinel_observe()
+    handle = gl.get_contract_at(addr)
+    state = None
+    source = ""
+
     try:
-        obs = target_contract.view().sentinel_observe()
-        if obs:
-            return str(obs)
+        raw = handle.view().sentinel_observe()
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+        if isinstance(parsed, dict) and len(parsed) > 0:
+            state, source = parsed, "sentinel_observe"
     except Exception:
         pass
 
-    # 2. Try is_paused() + get_balance()
-    try:
-        is_p = target_contract.view().is_paused()
-        bal = 0
-        try:
-            bal = int(target_contract.view().get_balance())
-        except Exception:
-            pass
-        return json.dumps({
-            "target": addr.as_hex,
-            "is_paused": bool(is_p),
-            "balance": bal,
-        })
-    except Exception:
-        pass
+    if state is None:
+        paused = _read_paused(addr)
+        if paused >= 0:
+            state = {"is_paused": paused == 1}
+            try:
+                state["balance"] = int(handle.view().get_balance())
+            except Exception:
+                pass
+            source = "is_paused"
 
-    # 3. Fallback observation
-    return json.dumps({
-        "target": addr.as_hex,
-        "observation": "Target contract reachable on-chain",
-    })
+    if state is None:
+        raise gl.vm.UserError(E + "target exposes no readable observation")
+
+    text = json.dumps(
+        {"target": addr.as_hex, "source": source, "observed_at": int(_now()), "state": state},
+        sort_keys=True, default=str,
+    )
+    if len(text) > MAX_OBSERVATION:
+        text = text[:MAX_OBSERVATION] + "...[TRUNCATED]"
+    return text
+
+
+def _adjudicate(prompt: str, bar: int) -> dict:
+    """One consensus round. Validators must agree on the thresholded action."""
+
+    def leader_fn():
+        res = _ask(prompt)
+        res["action"] = (res["decision"] == "yes" and int(res["confidence"]) >= bar)
+        return res
+
+    def validator_fn(leader_result) -> bool:
+        if not isinstance(leader_result, gl.vm.Return):
+            message = getattr(leader_result, "message", "")
+            try:
+                leader_fn()
+            except gl.vm.UserError as error:
+                return _same_error(message, getattr(error, "message", str(error)))
+            return False
+        theirs = leader_result.calldata
+        if not _valid_result(theirs):
+            return False
+        mine = leader_fn()
+        return _matches_action(mine, theirs, bar)
+
+    return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
 
 @allow_storage
@@ -303,6 +370,8 @@ class Target:
     false_alarm_count: u32
     target_authorized: bool
     pending_incident_id: str
+    pending_since: u64
+    failed_hook_incident: str  # set when a hook was reconciled as failed; lets a late confirm_* heal it
 
 
 @allow_storage
@@ -318,6 +387,7 @@ class Incident:
     reason: str
     created_at: u64
     decided_at: u64
+    hook_status: str  # "n/a" | "pending" | "verified" | "failed"
 
 
 class SentinelGuard(gl.Contract):
@@ -329,11 +399,15 @@ class SentinelGuard(gl.Contract):
     next_seq: u64
     trust: TreeMap[str, u8]
     incident_bond: u256
+    hook_grace: u64
+    reporter_last: TreeMap[str, str]
+    reporter_n: TreeMap[str, u32]
 
     def __init__(self):
         self.owner = gl.message.sender_address
         self.next_seq = u64(0)
         self.incident_bond = u256(DEFAULT_INCIDENT_BOND)
+        self.hook_grace = u64(HOOK_GRACE_DEFAULT)
 
     # -- internals -----------------------------------------------------------
 
@@ -352,72 +426,118 @@ class SentinelGuard(gl.Contract):
             raise gl.vm.UserError(E + "unknown target")
         return self.targets[key]
 
+    def _owner_matches(self, target_contract, name: str, caller: Address) -> bool:
+        try:
+            owner_val = getattr(target_contract.view(), name)()
+        except Exception:
+            return False
+        if isinstance(owner_val, Address):
+            return owner_val == caller
+        if isinstance(owner_val, str):
+            try:
+                return Address(owner_val) == caller
+            except Exception:
+                return False
+        return False
+
     def _is_target_authorized(self, target_addr: Address, caller: Address) -> bool:
         """
-        Verifies if caller has authorization from the target contract:
-        - Target contract itself calling
-        - Target contract's owner / admin view matches caller
-        - Target contract's is_sentinel_authorized view method approves caller
+        True only if the TARGET vouches for the caller:
+        - the target contract itself is calling, or
+        - the target's is_sentinel_authorized(caller) says yes, or
+        - the caller is the owner the target reports via owner()/get_owner()/owner_address().
         """
         if caller == target_addr:
             return True
         target_contract = gl.get_contract_at(target_addr)
-        # Check is_sentinel_authorized(caller)
         try:
             if bool(target_contract.view().is_sentinel_authorized(caller.as_hex)):
                 return True
         except Exception:
             pass
-        # Check owner()
-        try:
-            owner_val = target_contract.view().owner()
-            if isinstance(owner_val, Address) and owner_val == caller:
+        for name in ("owner", "get_owner", "owner_address"):
+            if self._owner_matches(target_contract, name, caller):
                 return True
-            if isinstance(owner_val, str) and Address(owner_val) == caller:
-                return True
-        except Exception:
-            pass
-        # Check get_owner()
-        try:
-            owner_val = target_contract.view().get_owner()
-            if isinstance(owner_val, Address) and owner_val == caller:
-                return True
-            if isinstance(owner_val, str) and Address(owner_val) == caller:
-                return True
-        except Exception:
-            pass
-        # Check owner_address()
-        try:
-            owner_val = target_contract.view().owner_address()
-            if isinstance(owner_val, Address) and owner_val == caller:
-                return True
-            if isinstance(owner_val, str) and Address(owner_val) == caller:
-                return True
-        except Exception:
-            pass
         return False
+
+    def _mark(self, iid: str, hook_status: str) -> None:
+        if iid != "" and iid in self.incidents:
+            self.incidents[iid].hook_status = hook_status
+
+    def _settle(self, row: Target, hook_status: str) -> None:
+        self._mark(row.pending_incident_id, hook_status)
+        row.pending_incident_id = ""
+        row.pending_since = u64(0)
+
+    def _record_incident(self, row: Target, reporter: Address, kind: int, text: str,
+                         out: dict, decision_code: u8, hook_status: str, now: u64) -> str:
+        seq = int(self.next_seq)
+        self.next_seq = u64(seq + 1)
+        iid = "inc-" + str(seq)
+        self.incidents[iid] = Incident(
+            id=iid, target=row.address, reporter=reporter, kind=u8(kind),
+            evidence=text, decision=decision_code, confidence=u8(int(out["confidence"])),
+            reason=str(out["reason"])[:MAX_REASON], created_at=now, decided_at=now,
+            hook_status=hook_status,
+        )
+        self.incident_ids.append(iid)
+        rkey = self._key(reporter)
+        count = int(self.reporter_n[rkey]) if rkey in self.reporter_n else 0
+        self.reporter_n[rkey] = u32(count + 1)
+        self.reporter_last[rkey] = iid
+        return iid
+
+    # -- hook state transitions (each one is reachable only with evidence) -----
+
+    def _finish_pause(self, row: Target, now: u64) -> None:
+        self._settle(row, "verified")
+        row.failed_hook_incident = ""
+        row.status = S_HALTED
+        row.halted_at = now
+
+    def _finish_resume(self, row: Target) -> None:
+        self._settle(row, "verified")
+        row.failed_hook_incident = ""
+        row.status = S_ACTIVE
+        row.halted_at = u64(0)
+        row.last_incident_reason = ""
+        row.confidence_bar = u8(min(BAR_CEILING, int(row.confidence_bar) + BAR_STEP))
+
+    def _fail_pause(self, row: Target) -> None:
+        iid = row.pending_incident_id
+        self._settle(row, "failed")
+        row.failed_hook_incident = iid
+        row.status = S_ACTIVE            # never claimed halted, so go back to active
+
+    def _fail_resume(self, row: Target) -> None:
+        iid = row.pending_incident_id
+        self._settle(row, "failed")
+        row.failed_hook_incident = iid
+        row.status = S_HALTED            # never claimed resumed; original incident reason is kept
 
     # -- registration and rulebook control -------------------------------------
 
     @gl.public.write
     def register_target(self, target: str, rulebook: str, pausable: bool) -> None:
         """
-        Registration requires target authorization or provisions a target-controlled reclaim path.
-        If target exposes an owner or authorization hook, the registrar must be authorized.
-        The target contract always retains an unconditional reclaim path via reclaim_target_control.
+        A caller the target authorizes may register it (pausable or not). Anyone else
+        may only register a read-only flag; that registration is marked
+        target_authorized=False and the target can reclaim it at any time.
         """
         addr = Address(target)
         if addr == ZERO:
             raise gl.vm.UserError(E + "zero address")
         key = self._key(addr)
         if key in self.targets:
-            raise gl.vm.UserError(E + "already registered")
+            raise gl.vm.UserError(E + "already registered (target owner: reclaim_target_control)")
         text = rulebook.strip()
         if len(text) < MIN_RULEBOOK or len(text) > MAX_RULEBOOK:
             raise gl.vm.UserError(E + "rulebook out of bounds")
 
         caller = gl.message.sender_address
         is_auth = self._is_target_authorized(addr, caller)
+        if pausable and not is_auth:
+            raise gl.vm.UserError(E + "pausable registration requires target authorization")
 
         self.targets[key] = Target(
             address=addr,
@@ -434,33 +554,51 @@ class SentinelGuard(gl.Contract):
             false_alarm_count=u32(0),
             target_authorized=is_auth,
             pending_incident_id="",
+            pending_since=u64(0),
+            failed_hook_incident="",
         )
         self.target_ids.append(key)
 
     @gl.public.write
     def update_rulebook(self, target: str, rulebook: str) -> None:
         """
-        Rulebook control requires target authorization or controller authority,
-        and is blocked while the target is halted or undergoing action verification.
+        - A caller the target authorizes may replace the rulebook at any time except
+          while a pause/resume hook is in flight.
+        - A third-party registrar may replace it only while the target is ACTIVE
+          (so it cannot rewrite the rules to dodge or force a live incident).
         """
         row = self._get_target(target)
         caller = gl.message.sender_address
-        is_auth = self._is_target_authorized(row.address, caller)
-        if caller != row.registered_by and not is_auth:
-            raise gl.vm.UserError(E + "not authorized by target or controller")
-        if row.status != S_ACTIVE:
-            raise gl.vm.UserError(E + "target halted or in verification")
+        if row.status == S_PAUSING or row.status == S_RESUMING:
+            raise gl.vm.UserError(E + "hook verification in flight")
+        if not self._is_target_authorized(row.address, caller):
+            if caller != row.registered_by:
+                raise gl.vm.UserError(E + "not authorized by target or controller")
+            if row.status != S_ACTIVE:
+                raise gl.vm.UserError(E + "target halted: only the target may change its rulebook")
         text = rulebook.strip()
         if len(text) < MIN_RULEBOOK or len(text) > MAX_RULEBOOK:
             raise gl.vm.UserError(E + "rulebook out of bounds")
         row.rulebook = text
 
     @gl.public.write
+    def set_pausable(self, target: str, pausable: bool) -> None:
+        """Only a caller the target authorizes may switch pausable on or off, and only while ACTIVE."""
+        row = self._get_target(target)
+        if not self._is_target_authorized(row.address, gl.message.sender_address):
+            raise gl.vm.UserError(E + "not authorized by target")
+        if row.status != S_ACTIVE:
+            raise gl.vm.UserError(E + "target halted or in verification")
+        row.pausable = pausable
+        row.target_authorized = True
+
+    @gl.public.write
     def reclaim_target_control(self, target: str, new_controller: str) -> None:
         """
-        Target-controlled reclaim path:
-        The target contract itself or its verified owner can reclaim control
-        of registration and rulebook at any time, overriding third-party registrars.
+        Target-controlled reclaim path. The target itself or its verified owner takes
+        control of registration and rulebook from any third-party registrar.
+        A read-only halt flag that a third party raised without target authorization
+        is cleared, since it never had authority over the target.
         """
         row = self._get_target(target)
         caller = gl.message.sender_address
@@ -469,6 +607,10 @@ class SentinelGuard(gl.Contract):
         new_ctrl = Address(new_controller)
         if new_ctrl == ZERO:
             raise gl.vm.UserError(E + "zero address")
+        if (not row.target_authorized) and (not row.pausable) and row.status == S_HALTED:
+            row.status = S_ACTIVE
+            row.halted_at = u64(0)
+            row.last_incident_reason = ""
         row.registered_by = new_ctrl
         row.target_authorized = True
 
@@ -480,6 +622,15 @@ class SentinelGuard(gl.Contract):
         if gl.message.sender_address != self.owner:
             raise gl.vm.UserError(E + "not owner")
         self.incident_bond = amount
+
+    @gl.public.write
+    def set_hook_grace(self, seconds: u64) -> None:
+        """Owner-only: how long a finalized hook may stay unconfirmed before it counts as failed."""
+        if gl.message.sender_address != self.owner:
+            raise gl.vm.UserError(E + "not owner")
+        if int(seconds) < HOOK_GRACE_MIN or int(seconds) > HOOK_GRACE_MAX:
+            raise gl.vm.UserError(E + "grace out of bounds")
+        self.hook_grace = seconds
 
     @gl.public.write
     def withdraw_treasury(self, to: str, amount: u256) -> None:
@@ -510,68 +661,40 @@ class SentinelGuard(gl.Contract):
         if len(text) == 0 or len(text) > MAX_EVIDENCE:
             raise gl.vm.UserError(E + "evidence out of bounds")
 
-        # 1. Fetch authenticated target observation directly from target contract
+        # Fails closed if the target exposes nothing readable.
         observation = _fetch_target_observation(row.address)
 
-        rulebook, ev, obs, bar = row.rulebook, text, observation, int(row.confidence_bar)
-
-        def leader_fn():
-            res = _ask(HALT_PROMPT.format(
-                rulebook=_fence(rulebook),
-                observation=_fence(obs),
-                evidence=_fence(ev),
-            ))
-            res["action"] = (res["decision"] == "yes" and int(res["confidence"]) >= bar)
-            return res
-
-        def validator_fn(leader_result) -> bool:
-            if not isinstance(leader_result, gl.vm.Return):
-                message = getattr(leader_result, "message", "")
-                try:
-                    leader_fn()
-                except gl.vm.UserError as error:
-                    return _same_error(message, getattr(error, "message", str(error)))
-                return False
-            theirs = leader_result.calldata
-            if not isinstance(theirs, dict) or theirs.get("decision") not in CODES:
-                return False
-            mine = leader_fn()
-            # Validators must agree on the thresholded action
-            return _matches_action(mine, theirs, bar)
-
-        out = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
+        prompt = HALT_PROMPT.format(
+            rulebook=_fence(row.rulebook),
+            observation=_fence(observation),
+            evidence=_fence(text),
+        )
+        out = _adjudicate(prompt, int(row.confidence_bar))
 
         now = _now()
-        seq = int(self.next_seq)
-        self.next_seq = u64(seq + 1)
-        iid = "inc-" + str(seq)
-
-        confidence = u8(out["confidence"])
-        will_halt = out["decision"] == "yes" and int(confidence) >= int(row.confidence_bar)
+        confidence = int(out["confidence"])
+        will_halt = out["decision"] == "yes" and confidence >= int(row.confidence_bar)
         decision_code = D_ACTION if will_halt else (D_UNCERTAIN if out["decision"] != "no" else D_NO_ACTION)
-
-        self.incidents[iid] = Incident(
-            id=iid, target=row.address, reporter=reporter, kind=u8(0),
-            evidence=text, decision=decision_code, confidence=confidence,
-            reason=out["reason"], created_at=now, decided_at=now,
-        )
-        self.incident_ids.append(iid)
+        hook_status = "pending" if (will_halt and row.pausable) else "n/a"
+        iid = self._record_incident(row, reporter, 0, text, out, decision_code, hook_status, now)
         row.incident_count = u32(int(row.incident_count) + 1)
 
         key = self._key(reporter)
         current_trust = self._trust_of(reporter)
 
         if will_halt:
-            row.last_incident_reason = out["reason"]
+            row.last_incident_reason = str(out["reason"])[:MAX_REASON]
             row.near_miss_count = u32(0)
             row.false_alarm_count = u32(0)
             self.trust[key] = u8(min(TRUST_CEILING, current_trust + TRUST_GAIN))
             _Payable(reporter).emit_transfer(value=bond)
 
             if row.pausable:
-                # Guardian status changes ONLY after the finalized pause hook is verified
+                # Guardian status changes ONLY once the finalized pause hook is confirmed.
                 row.status = S_PAUSING
                 row.pending_incident_id = iid
+                row.pending_since = now
+                row.failed_hook_incident = ""
                 gl.get_contract_at(row.address).emit(on="finalized").sentinel_pause()
             else:
                 row.status = S_HALTED
@@ -614,60 +737,30 @@ class SentinelGuard(gl.Contract):
         if len(text) == 0 or len(text) > MAX_EVIDENCE:
             raise gl.vm.UserError(E + "evidence out of bounds")
 
-        # 1. Fetch authenticated target observation directly from target contract
         observation = _fetch_target_observation(row.address)
 
-        rulebook, incident_reason, ev, obs, bar = (
-            row.rulebook, row.last_incident_reason, text, observation, int(row.resume_bar)
+        prompt = RESUME_PROMPT.format(
+            rulebook=_fence(row.rulebook),
+            incident_reason=_fence(row.last_incident_reason),
+            observation=_fence(observation),
+            evidence=_fence(text),
         )
+        out = _adjudicate(prompt, int(row.resume_bar))
 
-        def leader_fn():
-            res = _ask(RESUME_PROMPT.format(
-                rulebook=_fence(rulebook),
-                incident_reason=_fence(incident_reason),
-                observation=_fence(obs),
-                evidence=_fence(ev),
-            ))
-            res["action"] = (res["decision"] == "yes" and int(res["confidence"]) >= bar)
-            return res
-
-        def validator_fn(leader_result) -> bool:
-            if not isinstance(leader_result, gl.vm.Return):
-                message = getattr(leader_result, "message", "")
-                try:
-                    leader_fn()
-                except gl.vm.UserError as error:
-                    return _same_error(message, getattr(error, "message", str(error)))
-                return False
-            theirs = leader_result.calldata
-            if not isinstance(theirs, dict) or theirs.get("decision") not in CODES:
-                return False
-            mine = leader_fn()
-            # Validators must agree on the thresholded action
-            return _matches_action(mine, theirs, bar)
-
-        out = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-
-        seq = int(self.next_seq)
-        self.next_seq = u64(seq + 1)
-        iid = "inc-" + str(seq)
-        confidence = u8(out["confidence"])
-        will_resume = out["decision"] == "yes" and int(confidence) >= int(row.resume_bar)
+        confidence = int(out["confidence"])
+        will_resume = out["decision"] == "yes" and confidence >= int(row.resume_bar)
         decision_code = D_ACTION if will_resume else (D_UNCERTAIN if out["decision"] != "no" else D_NO_ACTION)
-
-        self.incidents[iid] = Incident(
-            id=iid, target=row.address, reporter=reporter, kind=u8(1),
-            evidence=text, decision=decision_code, confidence=confidence,
-            reason=out["reason"], created_at=now, decided_at=now,
-        )
-        self.incident_ids.append(iid)
+        hook_status = "pending" if (will_resume and row.pausable) else "n/a"
+        iid = self._record_incident(row, reporter, 1, text, out, decision_code, hook_status, now)
 
         if will_resume:
             _Payable(reporter).emit_transfer(value=bond)
             if row.pausable:
-                # Guardian status changes ONLY after finalized resume hook is verified
+                # Guardian status changes ONLY once the finalized resume hook is confirmed.
                 row.status = S_RESUMING
                 row.pending_incident_id = iid
+                row.pending_since = now
+                row.failed_hook_incident = ""
                 gl.get_contract_at(row.address).emit(on="finalized").sentinel_resume()
             else:
                 row.status = S_ACTIVE
@@ -681,89 +774,68 @@ class SentinelGuard(gl.Contract):
 
     @gl.public.write
     def confirm_pause(self, target: str) -> None:
-        """
-        Finalized hook callback from target contract to verify pause execution.
-        Changes guardian status to S_HALTED once confirmed.
-        """
+        """Callback the target emits (on finalization) after its pause hook ran."""
         addr = Address(target)
         if gl.message.sender_address != addr:
             raise gl.vm.UserError(E + "not target")
         row = self._get_target(target)
+        now = _now()
         if row.status == S_PAUSING:
+            self._finish_pause(row, now)
+        elif row.status == S_ACTIVE and row.failed_hook_incident != "":
+            # The hook arrived after we had given up on it: heal the mismatch.
+            self._mark(row.failed_hook_incident, "verified")
+            row.failed_hook_incident = ""
             row.status = S_HALTED
-            row.halted_at = _now()
-            row.pending_incident_id = ""
+            row.halted_at = now
 
     @gl.public.write
     def confirm_resume(self, target: str) -> None:
-        """
-        Finalized hook callback from target contract to verify resume execution.
-        Changes guardian status to S_ACTIVE once confirmed.
-        """
+        """Callback the target emits (on finalization) after its resume hook ran."""
         addr = Address(target)
         if gl.message.sender_address != addr:
             raise gl.vm.UserError(E + "not target")
         row = self._get_target(target)
         if row.status == S_RESUMING:
-            row.status = S_ACTIVE
-            row.halted_at = u64(0)
-            row.last_incident_reason = ""
-            row.confidence_bar = u8(min(BAR_CEILING, int(row.confidence_bar) + BAR_STEP))
-            row.pending_incident_id = ""
+            self._finish_resume(row)
+        elif row.status == S_HALTED and row.failed_hook_incident != "":
+            self._mark(row.failed_hook_incident, "verified")
+            self._finish_resume(row)
 
     @gl.public.write
     def verify_target_hook(self, target: str) -> str:
         """
-        Verifies target state after finalized pause or resume hook.
-        If verified: transitions guardian status.
-        If hook failed: reconciles status back on failure.
+        Permissionless. Moves PAUSING/RESUMING forward using the target's own state:
+        - target state confirms the hook  -> HALTED / ACTIVE ("verified_halt" / "verified_resume")
+        - not confirmed and the grace period has NOT elapsed -> no change ("pending"),
+          because a finalized hook only runs after the appeal window closes
+        - not confirmed after the grace period -> reconciled as failed
+          (PAUSING -> ACTIVE, RESUMING -> HALTED) ("reconciled_failure")
         """
         row = self._get_target(target)
+        if row.status != S_PAUSING and row.status != S_RESUMING:
+            return "no_pending_hook"
+
         now = _now()
+        paused = _read_paused(row.address)
+        expired = int(now) - int(row.pending_since) >= int(self.hook_grace)
 
         if row.status == S_PAUSING:
-            # Verify whether target is indeed paused
-            target_is_paused = False
-            try:
-                target_is_paused = bool(gl.get_contract_at(row.address).view().is_paused())
-            except Exception:
-                target_is_paused = False
-
-            if target_is_paused:
-                row.status = S_HALTED
-                row.halted_at = now
-                row.pending_incident_id = ""
+            if paused == 1:
+                self._finish_pause(row, now)
                 return "verified_halt"
-            else:
-                # Hook failed: reconcile on failure!
-                row.status = S_ACTIVE
-                row.last_incident_reason = "[HOOK_FAILED] Pause hook failed or reverted"
-                row.pending_incident_id = ""
-                return "reconciled_failure"
+            if not expired:
+                return "pending"
+            self._fail_pause(row)
+            return "reconciled_failure"
 
-        elif row.status == S_RESUMING:
-            # Verify whether target is unpaused
-            target_is_paused = True
-            try:
-                target_is_paused = bool(gl.get_contract_at(row.address).view().is_paused())
-            except Exception:
-                target_is_paused = True
-
-            if not target_is_paused:
-                row.status = S_ACTIVE
-                row.halted_at = u64(0)
-                row.last_incident_reason = ""
-                row.confidence_bar = u8(min(BAR_CEILING, int(row.confidence_bar) + BAR_STEP))
-                row.pending_incident_id = ""
-                return "verified_resume"
-            else:
-                # Hook failed: reconcile on failure!
-                row.status = S_HALTED
-                row.last_incident_reason = "[HOOK_FAILED] Resume hook failed or reverted"
-                row.pending_incident_id = ""
-                return "reconciled_failure"
-
-        return "no_pending_hook"
+        if paused == 0:
+            self._finish_resume(row)
+            return "verified_resume"
+        if not expired:
+            return "pending"
+        self._fail_resume(row)
+        return "reconciled_failure"
 
     # -- views -------------------------------------------------------------------
 
@@ -789,6 +861,9 @@ class SentinelGuard(gl.Contract):
             "incident_count": int(row.incident_count),
             "target_authorized": bool(row.target_authorized),
             "pending_incident_id": row.pending_incident_id,
+            "pending_since": int(row.pending_since),
+            "failed_hook_incident": row.failed_hook_incident,
+            "hook_grace_seconds": int(self.hook_grace),
         }, sort_keys=True)
 
     @gl.public.view
@@ -825,6 +900,7 @@ class SentinelGuard(gl.Contract):
             "reason": row.reason,
             "created_at": int(row.created_at),
             "decided_at": int(row.decided_at),
+            "hook_status": row.hook_status,
         }, sort_keys=True)
 
     @gl.public.view
@@ -838,14 +914,26 @@ class SentinelGuard(gl.Contract):
             out.append({
                 "id": row.id,
                 "target": row.target.as_hex,
+                "reporter": row.reporter.as_hex,
                 "kind": "halt_report" if row.kind == 0 else "resume_review",
                 "decision": NAMES.get(int(row.decision), "pending"),
                 "confidence": int(row.confidence),
                 "reason": row.reason,
                 "decided_at": int(row.decided_at),
+                "hook_status": row.hook_status,
             })
             i -= 1
         return json.dumps(out, sort_keys=True)
+
+    @gl.public.view
+    def reporter_incident_count(self, reporter: str) -> u32:
+        key = self._key(Address(reporter))
+        return self.reporter_n[key] if key in self.reporter_n else u32(0)
+
+    @gl.public.view
+    def reporter_latest_incident(self, reporter: str) -> str:
+        key = self._key(Address(reporter))
+        return self.reporter_last[key] if key in self.reporter_last else ""
 
     @gl.public.view
     def reporter_trust(self, reporter: str) -> u8:
@@ -854,6 +942,10 @@ class SentinelGuard(gl.Contract):
     @gl.public.view
     def incident_bond_amount(self) -> u256:
         return self.incident_bond
+
+    @gl.public.view
+    def hook_grace_seconds(self) -> u64:
+        return self.hook_grace
 
     @gl.public.view
     def treasury_balance(self) -> u256:
@@ -866,5 +958,6 @@ class SentinelGuard(gl.Contract):
             "incidents": len(self.incident_ids),
             "owner": self.owner.as_hex,
             "incident_bond": int(self.incident_bond),
+            "hook_grace_seconds": int(self.hook_grace),
             "treasury_balance": int(self.balance),
         }, sort_keys=True)

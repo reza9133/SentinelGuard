@@ -17,17 +17,17 @@ E = "[EXPECTED] "
 
 
 class DemoVault(gl.Contract):
-    owner: Address
+    owner_addr: Address   # NOT named `owner`: that would collide with the owner() view below
     sentinel: Address
     paused: bool
-    balance: u64
+    funds: u64            # NOT named `balance`: gl.Contract already has a native `balance`
     simulate_hook_failure: bool
 
     def __init__(self, sentinel: str):
-        self.owner = gl.message.sender_address
+        self.owner_addr = gl.message.sender_address
         self.sentinel = Address(sentinel)
         self.paused = False
-        self.balance = u64(0)
+        self.funds = u64(0)
         self.simulate_hook_failure = False
 
     def _require_sentinel(self) -> None:
@@ -35,7 +35,7 @@ class DemoVault(gl.Contract):
             raise gl.vm.UserError(E + "not sentinel")
 
     def _require_owner(self) -> None:
-        if gl.message.sender_address != self.owner:
+        if gl.message.sender_address != self.owner_addr:
             raise gl.vm.UserError(E + "not owner")
 
     # -- hook failure simulation (for testing) -------------------------------
@@ -89,15 +89,15 @@ class DemoVault(gl.Contract):
     def deposit(self, amount: u64) -> None:
         if self.paused:
             raise gl.vm.UserError(E + "paused")
-        self.balance = u64(int(self.balance) + int(amount))
+        self.funds = u64(int(self.funds) + int(amount))
 
     @gl.public.write
     def withdraw(self, amount: u64) -> None:
         if self.paused:
             raise gl.vm.UserError(E + "paused")
-        if int(amount) > int(self.balance):
+        if int(amount) > int(self.funds):
             raise gl.vm.UserError(E + "insufficient balance")
-        self.balance = u64(int(self.balance) - int(amount))
+        self.funds = u64(int(self.funds) - int(amount))
 
     # -- views and observations -----------------------------------------------
 
@@ -105,13 +105,15 @@ class DemoVault(gl.Contract):
     def sentinel_observe(self) -> str:
         """
         Returns authenticated on-chain state observation for SentinelGuard.
-        Includes pause state, balance, owner, and sentinel addresses.
+        Includes pause state, balance, owner, and sentinel addresses. SentinelGuard adds
+        its own provenance (target address, method, time) around this, so the vault
+        does not need to vouch for its own address.
         """
         return json.dumps({
             "target": gl.message.contract_address.as_hex,
             "is_paused": bool(self.paused),
-            "balance": int(self.balance),
-            "owner": self.owner.as_hex,
+            "balance": int(self.funds),
+            "owner": self.owner_addr.as_hex,
             "sentinel": self.sentinel.as_hex,
         }, sort_keys=True)
 
@@ -125,18 +127,17 @@ class DemoVault(gl.Contract):
 
     @gl.public.view
     def get_balance(self) -> u64:
-        return self.balance
+        return self.funds
 
     @gl.public.view
     def owner_address(self) -> Address:
-        return self.owner
+        return self.owner_addr
 
     @gl.public.view
     def owner(self) -> Address:
-        return self.owner
+        return self.owner_addr
 
     @gl.public.view
     def is_sentinel_authorized(self, addr: str) -> bool:
-        """Authorizes target owner and sentinel contract for management."""
-        a = Address(addr)
-        return a == self.owner or a == self.sentinel
+        """Only the vault's own owner may manage its SentinelGuard registration."""
+        return Address(addr) == self.owner_addr
