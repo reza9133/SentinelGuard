@@ -1,6 +1,6 @@
 {
   "network": "studionet",
   "chain_id": 61999,
-  "sentinel_guard": "0x58c4b25782270bb952ED818B3529549D1A5659aB",
-  "demo_vault": "0x1bE955c661803c9eDB992e79Ab2cb1fe967a3fC8"
+  "sentinel_guard": "0x623D42db647b66E4d8152d6a9C90937CeAD3a21d",
+  "demo_vault": "0x85dAf1A80AC8734a0f4236B03775332026739485"
 }
