@@ -14,12 +14,7 @@
 // a `fees` estimate first (see the reference implementation in
 // scripts/deploy.py in the contracts repo for the exact estimate shape).
 //
-// IMPORTANT: the addresses below are placeholders. The contract's storage
-// layout changed (registration/rulebook authorization, hook grace-period
-// reconciliation, per-reporter incident index), so any previous deployment
-// is NOT compatible - redeploy with `python3 scripts/deploy.py` first and
-// copy the resulting `sentinel_guard` / `demo_vault` addresses from the
-// generated deployed.<network>.json here before running the app.
+// Deployed to studionet (chain 61999) - matches deployed.studionet.json.
 // -----------------------------------------------------------------------
 import { studionet } from "genlayer-js/chains";
 
@@ -28,8 +23,8 @@ export const NETWORK_NAME = "studionet";
 export const IS_FEE_NETWORK = false;
 
 export const CONTRACTS = {
-  sentinelGuard: "0x0000000000000000000000000000000000000000", // TODO: set after redeploy
-  demoVault: "0x0000000000000000000000000000000000000000", // TODO: set after redeploy
+  sentinelGuard: "0x623D42db647b66E4d8152d6a9C90937CeAD3a21d",
+  demoVault: "0x85dAf1A80AC8734a0f4236B03775332026739485",
 };
 
 export const LINKS = {
