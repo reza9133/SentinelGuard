@@ -4,7 +4,15 @@ import GlassCard from "../ui/GlassCard.jsx";
 import Badge from "../ui/Badge.jsx";
 import Button from "../ui/Button.jsx";
 import RadarSpinner from "../icons/RadarSpinner.jsx";
-import { weiToGen, isAddress, DECISION_LABEL, DECISION_TONE } from "../../lib/format.js";
+import {
+  weiToGen,
+  isAddress,
+  formatDuration,
+  DECISION_LABEL,
+  DECISION_TONE,
+  HOOK_STATUS_LABEL,
+  HOOK_STATUS_TONE,
+} from "../../lib/format.js";
 import { CONTRACTS } from "../../config/network.js";
 
 const MIN_EVIDENCE = 1;
@@ -25,6 +33,17 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
   useEffect(() => {
     if (selectedTarget) setTargetInput(selectedTarget);
   }, [selectedTarget]);
+
+  // Only ticks while a finalized hook is actually pending, to drive the
+  // grace-period countdown below. This is the client's own clock, not the
+  // chain's — it's an estimate, so it's always phrased as "~".
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  const hookPendingNow = detail?.status === "pausing" || detail?.status === "resuming";
+  useEffect(() => {
+    if (!hookPendingNow) return undefined;
+    const id = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 5000);
+    return () => clearInterval(id);
+  }, [hookPendingNow]);
 
   useEffect(() => {
     sentinel.incidentBondAmount().then(setBondWei).catch(() => {});
@@ -203,6 +222,22 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
                       <p className="mt-1 opacity-80">
                         Guardian status changes only after finalized hook is verified or reconciled on failure.
                       </p>
+                      {detail.pending_since > 0 &&
+                        (() => {
+                          const elapsed = Math.max(0, nowSec - detail.pending_since);
+                          const remaining = Math.max(0, detail.hook_grace_seconds - elapsed);
+                          return remaining > 0 ? (
+                            <p className="mt-1 opacity-80">
+                              Grace period: ~{formatDuration(remaining)} left before this can be
+                              reconciled as a failed hook if it still hasn't confirmed.
+                            </p>
+                          ) : (
+                            <p className="mt-1 font-medium opacity-90">
+                              Grace period elapsed — reconciling now will mark it failed if the
+                              target still hasn't confirmed.
+                            </p>
+                          );
+                        })()}
                       {connected && (
                         <div className="mt-2">
                           <Button size="xs" onClick={handleVerifyHook} disabled={verifyingHook}>
@@ -210,6 +245,18 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
                           </Button>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {!pausing && !resuming && detail.failed_hook_incident && (
+                    <div className="rounded-xl border border-halted-300 bg-halted-50 p-3 text-xs text-halted-900">
+                      <p className="font-medium">
+                        Previous hook reconciled as failed (incident #{detail.failed_hook_incident}).
+                      </p>
+                      <p className="mt-1 opacity-80">
+                        If the target's confirm_pause/confirm_resume callback still arrives late,
+                        SentinelGuard heals this automatically the next time it's received.
+                      </p>
                     </div>
                   )}
 
@@ -383,6 +430,14 @@ function TxStatus({ tx }) {
               </p>
               <p className="text-active-900/80">Confidence: {tx.incident.confidence}/100</p>
               {tx.incident.reason && <p className="text-active-900/80">"{tx.incident.reason}"</p>}
+              {tx.incident.hook_status && (
+                <p className="text-active-900/80">
+                  Hook status:{" "}
+                  <Badge tone={HOOK_STATUS_TONE[tx.incident.hook_status] ?? "muted"}>
+                    {HOOK_STATUS_LABEL[tx.incident.hook_status] ?? tx.incident.hook_status}
+                  </Badge>
+                </p>
+              )}
             </div>
           )}
 
