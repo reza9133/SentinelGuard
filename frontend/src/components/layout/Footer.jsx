@@ -1,3 +1,4 @@
+import { Link } from "react-router-dom";
 import ShieldLogo from "../icons/ShieldLogo.jsx";
 import GenLayerMark from "../icons/GenLayerMark.jsx";
 import { GithubIcon, TwitterIcon } from "../icons/SocialIcons.jsx";
@@ -27,14 +28,14 @@ export default function Footer() {
               <h4 className="text-sm font-semibold text-ink">Project</h4>
               <ul className="mt-3 space-y-2 text-sm text-muted">
                 <li>
-                  <a href="#how-it-works" className="hover:text-chain-600">
+                  <Link to="/#how-it-works" className="hover:text-chain-600">
                     How it works
-                  </a>
+                  </Link>
                 </li>
                 <li>
-                  <a href="#about" className="hover:text-chain-600">
+                  <Link to="/#about" className="hover:text-chain-600">
                     About the track
-                  </a>
+                  </Link>
                 </li>
                 <li>
                   <a href={LINKS.github} target="_blank" rel="noreferrer" className="hover:text-chain-600">

@@ -164,7 +164,9 @@ export function useSentinelClient(walletAddress) {
     getIncident: async (id) => parseJson(await readOne("get_incident", [id]), null),
     recentIncidents: async (n = 20) => parseJson(await readOne("recent_incidents", [n]), []),
     reporterTrust: async (address) => readOne("reporter_trust", [address]),
+    reporterIncidentCount: async (address) => readOne("reporter_incident_count", [address]),
     incidentBondAmount: async () => readOne("incident_bond_amount", []),
+    hookGraceSeconds: async () => readOne("hook_grace_seconds", []),
     treasuryBalance: async () => readOne("treasury_balance", []),
     stats: async () => parseJson(await readOne("stats", []), null),
     status: async (target) => readOne("status", [target]),
@@ -194,5 +196,11 @@ export function useSentinelClient(walletAddress) {
     updateRulebook: (target, rulebook) => submit("update_rulebook", [target, rulebook], 0),
     registerTarget: (target, rulebook, pausable) =>
       submit("register_target", [target, rulebook, pausable], 0),
+    setPausable: (target, pausable) => submit("set_pausable", [target, pausable], 0),
+
+    // -- owner-only writes (contract rejects these unless sender == owner) --
+    setIncidentBond: (amountWei) => submit("set_incident_bond", [amountWei], 0),
+    setHookGrace: (seconds) => submit("set_hook_grace", [seconds], 0),
+    withdrawTreasury: (to, amountWei) => submit("withdraw_treasury", [to, amountWei], 0),
   };
 }

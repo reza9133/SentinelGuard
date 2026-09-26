@@ -73,12 +73,14 @@ export default function AccountPanel({ wallet, sentinel }) {
     switchNetwork,
   } = wallet;
 
-  // Reporter trust (0-100, starts at 50). Refetched whenever the modal
-  // opens so it's fresh after a report resolves.
+  // Reporter trust (0-100, starts at 50) and lifetime report count.
+  // Refetched whenever the modal opens so it's fresh after a report resolves.
   const [trust, setTrust] = useState(null);
+  const [incidentCount, setIncidentCount] = useState(null);
   useEffect(() => {
     if (!address || !sentinel?.reporterTrust) {
       setTrust(null);
+      setIncidentCount(null);
       return undefined;
     }
     let cancelled = false;
@@ -90,6 +92,15 @@ export default function AccountPanel({ wallet, sentinel }) {
       })
       .catch(() => {
         if (!cancelled) setTrust(null);
+      });
+    sentinel
+      .reporterIncidentCount(address)
+      .then((value) => {
+        const n = Number(value);
+        if (!cancelled) setIncidentCount(Number.isFinite(n) ? n : null);
+      })
+      .catch(() => {
+        if (!cancelled) setIncidentCount(null);
       });
     return () => {
       cancelled = true;
@@ -218,6 +229,12 @@ export default function AccountPanel({ wallet, sentinel }) {
             <p className="mt-1 text-xs text-muted">
               Starts at 50. Reports that lead to a halt raise it, false alarms lower it. Below 10
               you can&apos;t file reports.
+            </p>
+          </InfoCard>
+
+          <InfoCard label="Incidents reported">
+            <p className="font-display text-xl font-semibold text-ink">
+              {incidentCount !== null ? incidentCount : "—"}
             </p>
           </InfoCard>
 

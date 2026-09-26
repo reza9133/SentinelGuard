@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
 import Button from "../ui/Button.jsx";
 import { LINKS } from "../../config/network.js";
 
@@ -50,7 +51,7 @@ export default function Hero() {
             variants={{ hidden: { opacity: 0, y: 14 }, show: { opacity: 1, y: 0 } }}
             className="mt-8 flex flex-wrap items-center gap-3"
           >
-            <Button as="a" href="#targets">
+            <Button as={Link} to="/targets">
               View targets
             </Button>
             <Button as="a" href={LINKS.github} target="_blank" rel="noreferrer" variant="secondary">

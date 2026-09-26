@@ -1,37 +1,42 @@
 import { useState } from "react";
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
 import ShieldLogo from "../icons/ShieldLogo.jsx";
 import AccountPanel from "../wallet/AccountPanel.jsx";
+import { useOwner } from "../../hooks/useOwner.js";
 
 const NAV = [
-  { href: "#how-it-works", label: "How it works" },
-  { href: "#about", label: "About" },
-  { href: "#targets", label: "Targets" },
-  { href: "#app", label: "Open app" },
+  { href: "/#how-it-works", label: "How it works" },
+  { href: "/#about", label: "About" },
+  { href: "/targets", label: "Targets" },
+  { href: "/activity", label: "Activity" },
 ];
 
 export default function Header({ wallet, sentinel }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const { isOwner } = useOwner(sentinel, wallet.address);
+
+  const items = isOwner ? [...NAV, { href: "/admin", label: "Admin" }] : NAV;
 
   return (
     <header className="sticky top-0 z-40 border-b border-black/5 bg-white/75 backdrop-blur-md">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-3.5">
-        <a href="#top" className="flex items-center gap-2.5">
+        <Link to="/" className="flex items-center gap-2.5">
           <ShieldLogo size={32} />
           <span className="font-display text-[17px] font-semibold tracking-tight">
             Sentinel<span className="text-chain-500">Guard</span>
           </span>
-        </a>
+        </Link>
 
         <nav className="hidden items-center gap-7 md:flex">
-          {NAV.map((item) => (
-            <a
+          {items.map((item) => (
+            <Link
               key={item.href}
-              href={item.href}
+              to={item.href}
               className="text-sm font-medium text-muted transition-colors hover:text-ink"
             >
               {item.label}
-            </a>
+            </Link>
           ))}
         </nav>
 
@@ -57,15 +62,15 @@ export default function Header({ wallet, sentinel }) {
           exit={{ height: 0, opacity: 0 }}
           className="flex flex-col gap-1 border-t border-black/5 px-5 py-3 md:hidden"
         >
-          {NAV.map((item) => (
-            <a
+          {items.map((item) => (
+            <Link
               key={item.href}
-              href={item.href}
+              to={item.href}
               onClick={() => setMenuOpen(false)}
               className="rounded-lg px-2 py-2 text-sm font-medium text-muted hover:bg-chain-50 hover:text-chain-600"
             >
               {item.label}
-            </a>
+            </Link>
           ))}
         </motion.nav>
       )}
