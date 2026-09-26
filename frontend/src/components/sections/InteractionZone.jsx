@@ -17,6 +17,8 @@ import { CONTRACTS } from "../../config/network.js";
 
 const MIN_EVIDENCE = 1;
 const MAX_EVIDENCE = 2000;
+const MIN_RULEBOOK = 20;
+const MAX_RULEBOOK = 1000;
 
 export default function InteractionZone({ sentinel, wallet, selectedTarget, onSelectTarget, onChainChanged }) {
   const [targetInput, setTargetInput] = useState(selectedTarget || CONTRACTS.demoVault);
@@ -29,6 +31,10 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
   const [evidence, setEvidence] = useState("");
   const [resumeEvidence, setResumeEvidence] = useState("");
   const [tx, setTx] = useState({ status: "idle" });
+
+  const [rulebookInput, setRulebookInput] = useState("");
+  const [pausableInput, setPausableInput] = useState(true);
+  const [registering, setRegistering] = useState(false);
 
   useEffect(() => {
     if (selectedTarget) setTargetInput(selectedTarget);
@@ -101,6 +107,34 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
       setTx({ status: "error", kind: "verify_hook", message: err.message || "Verification failed." });
     } finally {
       setVerifyingHook(false);
+    }
+  }
+
+  async function handleRegister() {
+    if (!connected) {
+      setTx({ status: "error", kind: "register", message: "Connect a wallet first." });
+      return;
+    }
+    const text = rulebookInput.trim();
+    if (text.length < MIN_RULEBOOK || text.length > MAX_RULEBOOK) {
+      setTx({
+        status: "error",
+        kind: "register",
+        message: `Rulebook must be ${MIN_RULEBOOK}–${MAX_RULEBOOK} characters (currently ${text.length}).`,
+      });
+      return;
+    }
+    setRegistering(true);
+    setTx({ status: "pending", kind: "register" });
+    try {
+      await sentinel.registerTarget(targetInput, text, pausableInput);
+      setTx({ status: "success", kind: "register", refreshedAt: Date.now() });
+      onChainChanged?.();
+      setRulebookInput("");
+    } catch (err) {
+      setTx({ status: "error", kind: "register", message: err.message || "Registration failed." });
+    } finally {
+      setRegistering(false);
     }
   }
 
@@ -191,7 +225,48 @@ export default function InteractionZone({ sentinel, wallet, selectedTarget, onSe
                 </div>
               )}
               {!loadingDetail && detailError && (
-                <p className="rounded-xl bg-black/[0.03] px-4 py-3 text-sm text-muted">{detailError}</p>
+                <div className="space-y-4">
+                  <p className="rounded-xl bg-black/[0.03] px-4 py-3 text-sm text-muted">{detailError}</p>
+                  {isAddress(targetInput) && (
+                    <div className="space-y-3 rounded-xl border border-black/10 bg-black/[0.02] p-4">
+                      <p className="text-sm font-medium text-ink">Register this target</p>
+                      <p className="text-xs leading-relaxed text-muted">
+                        A caller the target authorizes (the target itself, its owner, or anyone
+                        its is_sentinel_authorized() hook approves) can register it as pausable.
+                        Anyone else can only register a read-only flag, and the target can
+                        reclaim control at any time via reclaim_target_control.
+                      </p>
+                      <textarea
+                        value={rulebookInput}
+                        onChange={(e) => setRulebookInput(e.target.value)}
+                        maxLength={MAX_RULEBOOK}
+                        rows={3}
+                        placeholder={`Plain-language invariants, e.g. "no single withdrawal exceeds 10% of TVL" (min ${MIN_RULEBOOK} characters)`}
+                        className="w-full resize-none rounded-lg border border-black/10 bg-white px-3 py-2.5 text-sm text-ink outline-none transition-colors focus:border-chain-500"
+                      />
+                      <div className="flex items-center justify-between">
+                        <label className="flex items-center gap-2 text-xs text-muted">
+                          <input
+                            type="checkbox"
+                            checked={pausableInput}
+                            onChange={(e) => setPausableInput(e.target.checked)}
+                          />
+                          Pausable (requires target authorization)
+                        </label>
+                        <span className="text-xs text-muted">
+                          {rulebookInput.trim().length}/{MAX_RULEBOOK}
+                        </span>
+                      </div>
+                      {connected ? (
+                        <Button size="sm" disabled={registering} onClick={handleRegister}>
+                          {registering ? "Registering…" : "Register target"}
+                        </Button>
+                      ) : (
+                        <p className="text-xs text-muted">Connect a wallet to register.</p>
+                      )}
+                    </div>
+                  )}
+                </div>
               )}
               {!loadingDetail && detail && (
                 <div className="space-y-4">
@@ -412,7 +487,13 @@ function TxStatus({ tx }) {
           className="rounded-2xl border border-active-300 bg-active-50 px-5 py-4 text-sm text-active-900"
         >
           <div className="flex items-center justify-between">
-            <p className="font-medium">Consensus reached.</p>
+            <p className="font-medium">
+              {tx.kind === "register"
+                ? "Target registered."
+                : tx.kind === "verify_hook"
+                ? "Hook checked."
+                : "Consensus reached."}
+            </p>
             {tx.incident?.id && (
               <span className="font-mono text-xs font-semibold text-active-900/70">
                 Correlated incident: #{tx.incident.id}
