@@ -394,11 +394,23 @@ function TxStatus({ tx }) {
               <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-active-900/90">
                 <span>Target is_paused: <strong>{tx.targetState.targetIsPaused === true ? "True" : tx.targetState.targetIsPaused === false ? "False" : "Unspecified"}</strong></span>
                 <span>Guardian status: <strong>{tx.targetState.guardianStatus}</strong></span>
-                <span>Consistency: <strong>{tx.targetState.isConsistent ? "Verified consistent" : "Needs reconciliation"}</strong></span>
+                <span>
+                  Consistency:{" "}
+                  <strong>
+                    {tx.targetState.hookPending
+                      ? "Hook pending (not yet checked)"
+                      : tx.targetState.isConsistent === null
+                      ? "Unknown (target state unreadable)"
+                      : tx.targetState.isConsistent
+                      ? "Verified consistent"
+                      : "Inconsistent"}
+                  </strong>
+                </span>
               </div>
-              {tx.targetState.reconciled && (
+              {tx.targetState.hookPending && (
                 <p className="mt-1 text-xs font-medium text-chain-600">
-                  Hook status reconciled on-chain.
+                  Finalized hook has not run yet. Use "Verify / Reconcile Hook" once it has had
+                  time to finalize.
                 </p>
               )}
             </div>

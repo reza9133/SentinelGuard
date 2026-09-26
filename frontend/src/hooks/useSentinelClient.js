@@ -2,27 +2,11 @@ import { useEffect, useState } from "react";
 import { createClient } from "genlayer-js";
 import { CHAIN, NETWORK_NAME, CONTRACTS, IS_FEE_NETWORK } from "../config/network.js";
 import { getActiveProvider } from "../lib/eip6963.js";
+import { parseJson, txSucceeded, pickCorrelatedIncident, computeConsistency } from "../lib/correlate.js";
 
 // Reads never need a wallet - one shared, account-free client for the whole
 // app, created once.
 const readClient = createClient({ chain: CHAIN });
-
-function parseJson(raw, fallback) {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
-}
-
-/**
- * Checks whether the transaction succeeded according to GenLayer receipts.
- */
-function txSucceeded(receipt) {
-  const status = receipt?.statusName ?? receipt?.status;
-  const decided = status === "ACCEPTED" || status === "FINALIZED";
-  return decided && receipt?.txExecutionResultName === "FINISHED_WITH_RETURN";
-}
 
 /**
  * Bundles the read-only client (always usable) with a wallet-bound write
@@ -95,61 +79,43 @@ export function useSentinelClient(walletAddress) {
   }
 
   /**
-   * Correlates the submitted incident directly rather than guessing:
-   * 1. Extracts returned incident ID from execution result/receipt if available.
-   * 2. Checks target's pending_incident_id or incident record.
-   * 3. Matches exact incident by target and reporter.
+   * Correlates the submitted incident directly against the contract's own
+   * reporter -> latest-incident index instead of guessing from receipt
+   * shapes or falling back to "whatever incident is most recent". A write
+   * receipt from genlayer-js does not reliably expose a write method's
+   * return value (that is only decoded for deploys), so the contract
+   * exposes `reporter_latest_incident(reporter)` specifically for this.
+   *
+   * The looked-up incident is only returned if it actually matches both the
+   * target and the reporter that submitted this transaction - otherwise we
+   * return null rather than attribute someone else's incident to this call.
    */
-  async function correlateIncident(target, txReceipt, reporter) {
-    // 1. Check direct return value from receipt
-    const directVal =
-      txReceipt?.txExecutionResult?.returnValue ??
-      txReceipt?.returnValue ??
-      txReceipt?.returnData;
-    if (typeof directVal === "string" && directVal.startsWith("inc-")) {
-      const inc = parseJson(await readOne("get_incident", [directVal]), null);
-      if (inc) return inc;
+  async function correlateIncident(target, reporter) {
+    if (!reporter) return null;
+    let incidentId;
+    try {
+      incidentId = await readOne("reporter_latest_incident", [reporter]);
+    } catch (_) {
+      return null;
     }
+    if (!incidentId) return null;
 
-    // 2. Check target record for pending_incident_id
-    try {
-      const targetData = parseJson(await readOne("get_target", [target]), null);
-      if (targetData?.pending_incident_id) {
-        const inc = parseJson(await readOne("get_incident", [targetData.pending_incident_id]), null);
-        if (inc) return inc;
-      }
-    } catch (_) {}
-
-    // 3. Fallback: match by target and reporter from recent incidents
-    try {
-      const recents = parseJson(await readOne("recent_incidents", [10]), []);
-      const matched = recents.find(
-        (r) =>
-          r.target?.toLowerCase() === target?.toLowerCase() &&
-          (!reporter || !r.reporter || r.reporter.toLowerCase() === reporter.toLowerCase())
-      );
-      if (matched) {
-        return parseJson(await readOne("get_incident", [matched.id]), matched);
-      }
-      if (recents.length > 0) {
-        return parseJson(await readOne("get_incident", [recents[0].id]), recents[0]);
-      }
-    } catch (_) {}
-
-    return null;
+    const inc = parseJson(await readOne("get_incident", [incidentId]), null);
+    return pickCorrelatedIncident(inc, target, reporter);
   }
 
   /**
-   * Verifies the target state on-chain and checks consistency with SentinelGuard:
-   * 1. Queries target's own is_paused or sentinel_observe view synchronously.
-   * 2. Queries SentinelGuard guardian status and target details.
-   * 3. Reconciles or reports hook status on failure/success.
+   * Reads the target's own on-chain state and SentinelGuard's guardian
+   * status side by side, purely as reads - it never submits a transaction.
+   * Hook verification/reconciliation is a separate, explicit, user-triggered
+   * action (verifyTargetHook) so that this function can be called freely
+   * (e.g. right after a report) without racing the finalized pause/resume
+   * message, which only executes after the appeal window closes.
    */
   async function verifyTargetState(target) {
     let targetIsPaused = null;
     let targetObservation = null;
 
-    // 1. Read target contract directly
     try {
       targetIsPaused = await readClient.readContract({
         address: target,
@@ -172,30 +138,12 @@ export function useSentinelClient(walletAddress) {
       } catch (_) {}
     }
 
-    // 2. Read SentinelGuard status
-    let guardianStatus = await readOne("status", [target]);
+    const guardianStatus = await readOne("status", [target]);
     const targetData = parseJson(await readOne("get_target", [target]), null);
-
-    let reconciled = false;
-    // 3. If in pending hook verification ("pausing" or "resuming"), verify hook
-    if (guardianStatus === "pausing" || guardianStatus === "resuming") {
-      if (writeClient) {
-        try {
-          await submit("verify_target_hook", [target], 0);
-          guardianStatus = await readOne("status", [target]);
-          reconciled = true;
-        } catch (err) {
-          console.warn("Hook verification / reconciliation:", err);
-        }
-      }
-    }
-
-    const isConsistent =
-      targetIsPaused === null ||
-      (guardianStatus === "halted" && targetIsPaused === true) ||
-      (guardianStatus === "active" && targetIsPaused === false) ||
-      guardianStatus === "pausing" ||
-      guardianStatus === "resuming";
+    const { isConsistent, hookPending } = computeConsistency(
+      guardianStatus,
+      targetIsPaused !== null ? Boolean(targetIsPaused) : null
+    );
 
     return {
       targetAddress: target,
@@ -203,7 +151,7 @@ export function useSentinelClient(walletAddress) {
       guardianStatus,
       targetData,
       isConsistent,
-      reconciled,
+      hookPending,
     };
   }
 
@@ -228,14 +176,14 @@ export function useSentinelClient(walletAddress) {
     // -- writes (require a connected wallet) --------------------------------
     reportIncident: async (target, evidence, bondWei) => {
       const res = await submit("report_incident", [target, evidence], bondWei);
-      const incident = await correlateIncident(target, res.receipt, walletAddress);
+      const incident = await correlateIncident(target, walletAddress);
       const targetState = await verifyTargetState(target);
       return { ...res, incident, targetState };
     },
 
     requestResumeReview: async (target, evidence, bondWei) => {
       const res = await submit("request_resume_review", [target, evidence], bondWei);
-      const incident = await correlateIncident(target, res.receipt, walletAddress);
+      const incident = await correlateIncident(target, walletAddress);
       const targetState = await verifyTargetState(target);
       return { ...res, incident, targetState };
     },

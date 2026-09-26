@@ -13,6 +13,13 @@
 // IS_FEE_NETWORK to true - then every write in useSentinelClient.js needs
 // a `fees` estimate first (see the reference implementation in
 // scripts/deploy.py in the contracts repo for the exact estimate shape).
+//
+// IMPORTANT: the addresses below are placeholders. The contract's storage
+// layout changed (registration/rulebook authorization, hook grace-period
+// reconciliation, per-reporter incident index), so any previous deployment
+// is NOT compatible - redeploy with `python3 scripts/deploy.py` first and
+// copy the resulting `sentinel_guard` / `demo_vault` addresses from the
+// generated deployed.<network>.json here before running the app.
 // -----------------------------------------------------------------------
 import { studionet } from "genlayer-js/chains";
 
@@ -21,8 +28,8 @@ export const NETWORK_NAME = "studionet";
 export const IS_FEE_NETWORK = false;
 
 export const CONTRACTS = {
-  sentinelGuard: "0x58c4b25782270bb952ED818B3529549D1A5659aB",
-  demoVault: "0x1bE955c661803c9eDB992e79Ab2cb1fe967a3fC8",
+  sentinelGuard: "0x0000000000000000000000000000000000000000", // TODO: set after redeploy
+  demoVault: "0x0000000000000000000000000000000000000000", // TODO: set after redeploy
 };
 
 export const LINKS = {
