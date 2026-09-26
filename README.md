@@ -69,8 +69,8 @@ sequenceDiagram
     alt decision = yes AND confidence ≥ target's bar (halt action agreed)
         alt target is pausable
             Note over S: status becomes "pausing" (guardian status does NOT change yet)
-            S->)T: sentinel_pause() [on="finalized"]
-            T->)S: confirm_pause() / verify_target_hook()
+            S-)T: sentinel_pause() [on="finalized"]
+            T-)S: confirm_pause() / verify_target_hook()
             Note over S: status changes to "halted" ONLY after verified (or reconciles to active on failure)
         else target is read-only
             Note over S: status changes to "halted" immediately
