@@ -90,13 +90,25 @@ stateDiagram-v2
     [*] --> Active: register_target (authorized / reclaimable)
     Active --> Pausing: consensus agrees on halt (pausable target)
     Active --> Halted: consensus agrees on halt (read-only target)
-    Pausing --> Halted: finalized pause hook verified
-    Pausing --> Active: hook failed (reconciled on failure)
+    Pausing --> Halted: finalized pause hook confirmed (target state or confirm_pause)
+    Pausing --> Pausing: verify_target_hook checked too early (finalized msg hasn't run yet) → stays pending
+    Pausing --> Active: hook grace period elapsed with no confirmation → reconciled as failed
     Halted --> Resuming: consensus agrees on resume (pausable target)
     Halted --> Active: consensus agrees on resume (read-only target)
-    Resuming --> Active: finalized resume hook verified
-    Resuming --> Halted: hook failed (reconciled on failure)
+    Resuming --> Active: finalized resume hook confirmed
+    Resuming --> Resuming: verify_target_hook checked too early → stays pending
+    Resuming --> Halted: hook grace period elapsed with no confirmation → reconciled as failed
 ```
+
+`emit(on="finalized")` messages only execute once the appeal window has closed, so a
+hook that hasn't run yet is not the same as a hook that failed. `verify_target_hook`
+distinguishes the two: it only reconciles `Pausing`/`Resuming` back to
+`Active`/`Halted` after `hook_grace_seconds()` (default 1 hour, owner-tunable within
+5 min – 7 days) has elapsed with no confirmation — before that it just returns
+`"pending"` and leaves guardian status untouched. If the finalized hook does arrive
+late (after reconciliation already gave up on it), the next `confirm_pause` /
+`confirm_resume` heals the mismatch instead of leaving the guard permanently out of
+sync with the target.
 
 **The important split:** the *only* non-deterministic step is the LLM verdict, and even
 that is settled by validator consensus requiring agreement on the thresholded action. Everything after the
@@ -128,18 +140,22 @@ from unlimited addresses and walk the bar to its ceiling at zero cost — so tha
 | Threat | Defense |
 |---|---|
 | **Sybil spam to push the bar around** (either direction) | Every report is **payable**. The bond (default **2 GEN**) is refunded *only* when the report actually halts / resumes. Everything else — including a near-miss — forfeits it to the treasury. |
-| **Unsubstantiated or fake evidence spam** | **Authenticated target observations**: SentinelGuard queries the target contract's actual on-chain state synchronously before calling consensus; evidence is evaluated directly against authenticated target observations. |
-| **Validators disagreeing across the action threshold** | **Thresholded action agreement**: Validators must agree on the actual action (halt vs no-halt). If one validator scores above the bar (e.g. 71 with bar 70) and another scores below (e.g. 69), consensus rejects even if the numeric difference is within tolerance. |
-| **Target hijacking or unauthorized rulebook control** | **Target authorization & reclaim path**: Registration requires target authorization, and the target contract (or its verified owner) always retains an unconditional reclaim path (`reclaim_target_control`) to override or replace the controller. |
-| **Silent pause/resume hook failures** | **Finalized hook verification & failure reconciliation**: Guardian status changes to `halted` or `active` only after the finalized hook is verified on-chain. If the hook fails or reverts, status is reconciled back on failure. |
+| **Unsubstantiated or fake evidence spam** | **Authenticated target observations**: SentinelGuard queries the target contract's actual on-chain state synchronously before calling consensus, wraps it with its own provenance (target address, which view answered, when), and truncates it to a bounded size. If the target exposes no readable state at all, reporting **fails closed** — evidence is never judged in isolation. |
+| **Validators disagreeing across the action threshold** | **Thresholded action agreement**: Validators must agree on the actual action (halt vs no-halt), and the leader's proposal is shape-checked (decision must be a known label, confidence 0–100, reason bounded) before it's even compared. If one validator scores above the bar (e.g. 71 with bar 70) and another scores below (e.g. 69), consensus rejects even if the numeric difference is within tolerance. |
+| **Target hijacking or unauthorized rulebook/pausable control** | **Target authorization & reclaim path**: only a caller the target itself vouches for (the target contract, its `is_sentinel_authorized`, or its `owner()`/`get_owner()`/`owner_address()`) may register it as **pausable**, edit its rulebook while halted/pending, or flip `pausable`. Anyone else may only register a **read-only** flag, which is marked `target_authorized=False` and never triggers a real pause hook. The target (or its verified owner) can call `reclaim_target_control` **at any time** to take registrar authority back from a third party, which also clears any read-only halt that third party raised without real authority. |
+| **Racing the finalized pause/resume hook** | Guardian status changes to `halted` / `active` **only** once the target's own state confirms the hook (or the target calls `confirm_pause`/`confirm_resume`) — never just because `report_incident`/`request_resume_review` was accepted, and never because `verify_target_hook` was called before the finalized message actually ran. Checking too early returns `"pending"` and leaves status untouched; only after a grace period with no confirmation does it reconcile as failed. |
+| **Silent pause/resume hook failures** | If the hook genuinely reverts (or the target never implements it), `verify_target_hook` reconciles `Pausing`→`Active` / `Resuming`→`Halted` once the grace period has elapsed — the guard never claims a halt/resume that didn't happen, and the incident record is marked `"failed"` so integrators can see it. |
 | **Low-quality repeat reporters** | On-chain **reporter trust** (starts at 50). False alarms cost trust; under 10 you can't report. |
-| **Prompt injection through evidence or rulebook** | Untrusted text is neutralised (`<` `>` replaced) before entering the prompt, the prompt states that everything inside the markers is *data*, and the model must answer in strict JSON that is validated field by field. |
+| **Prompt injection through evidence or rulebook** | Untrusted text is neutralised (`<` `>` replaced) before entering the prompt, the prompt states that everything inside the markers is *data*, and the model must answer in strict JSON that is validated field by field on both leader and validator sides. |
 | **Malformed model output** | One automatic retry, then a typed `[LLM_ERROR]` — never silently turned into a business decision. |
-| **A target rewriting its rules to dodge a live incident** | `update_rulebook` is authorized-only and **blocked while the target is halted or in verification**. |
+| **A target rewriting its rules to dodge a live incident** | `update_rulebook` from a third-party registrar is only allowed while the target is `active` (not halted, not mid-verification); the target itself may always fix its own rulebook except while a hook is actually in flight. |
 | **Premature un-halting** | 5-minute resume cooldown, plus a separate prompt that must see evidence the *specific* original problem is gone. |
 
-The owner's powers are deliberately narrow: tune the bond amount and sweep forfeited
-bonds from the treasury. The owner **cannot** change any adjudication outcome.
+The owner's powers are deliberately narrow: tune the bond amount, tune how long a
+finalized hook may stay unconfirmed before it's treated as failed (bounded to
+5 minutes – 7 days), and sweep forfeited bonds from the treasury. The owner **cannot**
+change any adjudication outcome, and cannot touch a specific target's rulebook,
+pausable flag, or registration — only the target (or whoever it authorizes) can.
 
 ## 📜 Contract API
 
@@ -147,25 +163,33 @@ bonds from the treasury. The owner **cannot** change any adjudication outcome.
 
 | Method | Who | What it does |
 |---|---|---|
-| `register_target(target, rulebook, pausable)` | target / authorized registrar | Registers a contract with a 20–1000 char rulebook. Requires target authorization or provisions target-controlled reclaim path. |
-| `update_rulebook(target, rulebook)` | target or controller | Replaces the rulebook while active. Blocked during halt or verification. |
-| `reclaim_target_control(target, new_controller)` | target contract / target owner | Target-controlled reclaim path to reclaim registrar authority and rulebook control at any time. |
-| `report_incident(target, evidence)` 💰 | anyone (trust ≥ 10) | Bond + evidence → checks authenticated target observation → consensus on thresholded action → transitions to pausing / halted. |
-| `request_resume_review(target, evidence)` 💰 | anyone, after cooldown | Evidence → checks authenticated observation → consensus on thresholded action → transitions to resuming / active. |
-| `verify_target_hook(target)` | anyone | Verifies finalized pause or resume hook on-chain; transitions guardian status or reconciles on failure. |
-| `confirm_pause(target)` / `confirm_resume(target)` | target contract | Finalized callback emitted by target contract upon hook execution. |
+| `register_target(target, rulebook, pausable)` | anyone, if `pausable` then target-authorized | Registers a contract with a 20–1000 char rulebook. `pausable=True` requires target authorization (target itself, its `is_sentinel_authorized`, or its `owner()`); anyone may register `pausable=False` (read-only status flag). |
+| `update_rulebook(target, rulebook)` | target/authorized, or third-party registrar while `active` | Replaces the rulebook. Always blocked while a hook is in flight (`pausing`/`resuming`). |
+| `set_pausable(target, pausable)` | target-authorized only | Flips whether SentinelGuard is allowed to actually call the pause/resume hooks. Only while `active`. |
+| `reclaim_target_control(target, new_controller)` | target contract / target owner | Target-controlled reclaim path: takes registrar authority back from any third party at any time, and clears a read-only halt that third party raised without real authority. |
+| `report_incident(target, evidence)` 💰 | anyone (trust ≥ 10) | Bond + evidence → fetches an authenticated target observation (fails closed if unreadable) → consensus on the thresholded action → transitions to `pausing` / `halted`. |
+| `request_resume_review(target, evidence)` 💰 | anyone, after cooldown | Same pipeline as above → transitions to `resuming` / `active`. |
+| `verify_target_hook(target)` | anyone | Checks the target's own state for the pending pause/resume hook. Too early → `"pending"` (status untouched). Confirmed → transitions status. Grace period elapsed with no confirmation → `"reconciled_failure"` (status reverted, never claims a hook that didn't happen). |
+| `confirm_pause(target)` / `confirm_resume(target)` | target contract only | Finalized callback the target emits after its hook actually ran; also heals a mismatch if it arrives after a `reconciled_failure`. |
 | `set_incident_bond(amount)` | owner | Tunes the required bond. |
+| `set_hook_grace(seconds)` | owner | Tunes how long a pending hook may stay unconfirmed before `verify_target_hook` reconciles it as failed (5 min – 7 days). |
 | `withdraw_treasury(to, amount)` | owner | Sweeps forfeited bonds. |
 
 **Reads** (all free, all work without a wallet)
 
 `status(target)` (`"active"` \| `"halted"` \| `"pausing"` \| `"resuming"`) · `get_target(target)` · `list_targets(n)` · `get_incident(id)` ·
-`recent_incidents(n)` · `reporter_trust(address)` · `incident_bond_amount()` ·
+`recent_incidents(n)` · `reporter_trust(address)` · `reporter_incident_count(address)` ·
+`reporter_latest_incident(address)` · `incident_bond_amount()` · `hook_grace_seconds()` ·
 `treasury_balance()` · `stats()`
 
 > 💡 `status(target)` is a public halt flag. Other protocols, agents and frontends can
 > check it **before** interacting with a target — the same pattern oracle-consuming
 > contracts already use — even if the target isn't pausable.
+>
+> 💡 `reporter_latest_incident(address)` is what the frontend uses to correlate a
+> submitted transaction with the exact incident it created — a write receipt doesn't
+> reliably expose a contract method's return value, so this view exists specifically
+> so the client never has to guess (e.g. "assume it's the most recent incident").
 
 ## 🔌 Make your contract guardable
 
@@ -173,12 +197,12 @@ A target contract opts in with authenticated observations, authorization, and ho
 
 ```python
 class MyProtocol(gl.Contract):
-    owner: Address
+    owner_addr: Address        # not named `owner` if you also add an owner() view - avoid the name clash
     sentinel: Address          # 1. SentinelGuard's address, set at deploy time
     paused: bool
 
     def __init__(self, sentinel: str):
-        self.owner = gl.message.sender_address
+        self.owner_addr = gl.message.sender_address
         self.sentinel = Address(sentinel)
         self.paused = False
 
@@ -192,7 +216,7 @@ class MyProtocol(gl.Contract):
 
     @gl.public.view
     def is_sentinel_authorized(self, addr: str) -> bool:  # 3. Target authorization
-        return Address(addr) == self.owner or Address(addr) == self.sentinel
+        return Address(addr) == self.owner_addr           #    (only the target's own owner)
 
     @gl.public.write
     def sentinel_pause(self) -> None:      # 4. Only SentinelGuard may pause…
@@ -213,8 +237,11 @@ class MyProtocol(gl.Contract):
     # Every state-changing method starts with: if self.paused: raise ...
 ```
 
-Then call `register_target(address, rulebook, True)`. Not pausable? Register with
-`pausable=False` and you still get a first-class, publicly readable halt flag.
+Then call `register_target(address, rulebook, True)` **as the owner (or another address
+your `is_sentinel_authorized` approves)** — anyone else attempting `pausable=True` is
+rejected. Not pausable, or registering someone else's contract for visibility only?
+Register with `pausable=False` and you still get a first-class, publicly readable halt
+flag that never touches the target's state.
 
 ### What SentinelGuard deliberately does *not* do
 
@@ -226,12 +253,13 @@ registering a contract you don't control gives you no power over it.
 
 ## 🚀 Quickstart
 
-### Deployed (Studionet · chain 61999)
+### Deployed
 
-| Contract | Address |
-|---|---|
-| **SentinelGuard** | `0x58c4b25782270bb952ED818B3529549D1A5659aB` |
-| **DemoVault** | `0x1bE955c661803c9eDB992e79Ab2cb1fe967a3fC8` |
+Not currently deployed. The contract's storage layout changed (registration
+authorization, hook grace-period reconciliation, per-reporter incident index), so any
+prior deployment is incompatible — run the deploy script below, then paste the two
+resulting addresses into
+[`frontend/src/config/network.js`](frontend/src/config/network.js).
 
 ### Run the frontend
 
@@ -280,6 +308,21 @@ network; only deploy tooling differs. See the docstring in
 5. Wait out the 5-minute cooldown, then submit **resolution evidence** to request a
    resume review.
 
+## 🧪 Run the tests
+
+```bash
+# Contract logic — executes the real contracts/sentinel_guard.py and
+# demo_vault.py against a GenLayer-style direct-mode harness
+# (tests/genlayer_direct_harness.py), covering threshold-boundary consensus,
+# the finalized-hook race, hook-failure reconciliation, and authorization.
+python3 -m unittest tests.test_sentinel_guard -v
+
+# Client correlation/consistency logic — imports the real, SDK-free helpers
+# from frontend/src/lib/correlate.js (the same module useSentinelClient.js
+# calls), not a re-implementation.
+node tests/test_client_correlation.js
+```
+
 ## 🗂️ Repository layout
 
 ```
@@ -289,7 +332,12 @@ SentinelGuard/
 │   └── demo_vault.py        a toy target that opts in to being paused
 ├── scripts/
 │   └── deploy.py            deploys both, wires them, registers a demo target
+├── tests/
+│   ├── genlayer_direct_harness.py   minimal direct-mode harness (see its docstring)
+│   ├── test_sentinel_guard.py       contract tests, run with `python3 -m unittest`
+│   └── test_client_correlation.js   client-side correlation/consistency tests
 ├── frontend/                React + Vite dApp (see frontend/README.md)
+│   └── src/lib/correlate.js pure client verification/correlation logic (tested directly)
 ├── assets/                  README artwork
 └── requirements.txt         genlayer-py, pinned per network
 ```
