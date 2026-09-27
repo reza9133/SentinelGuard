@@ -61,7 +61,8 @@ src/
     ui/        Button, Badge, GlassCard
     wallet/    AccountPanel (header control + modals), Modal,
                WalletPickerList, AddressDisplay, icons
-    sections/  Hero, HowItWorks, About, Dashboard, InteractionZone
+    sections/  Hero, HowItWorks, About
+  pages/       HomePage, TargetsPage, TargetDetailPage, ActivityPage, AdminPage
   App.jsx
 ```
 
@@ -102,5 +103,5 @@ child to the header instead of covering the screen.
   load via `eth_accounts` — no popup, and only if the wallet already granted
   access. After an intentional disconnect (`sentinelguard_wallet_disconnected`)
   the app stays disconnected until the person connects again.
-- Reads (the Dashboard, target lookups) work with **no wallet connected**
+- Reads (the Targets page, target lookups) work with **no wallet connected**
   at all, via a separate account-free `genlayer-js` client.
