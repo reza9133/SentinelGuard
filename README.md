@@ -255,11 +255,17 @@ registering a contract you don't control gives you no power over it.
 
 ### Deployed
 
-Not currently deployed. The contract's storage layout changed (registration
-authorization, hook grace-period reconciliation, per-reporter incident index), so any
-prior deployment is incompatible — run the deploy script below, then paste the two
-resulting addresses into
-[`frontend/src/config/network.js`](frontend/src/config/network.js).
+Live on **Studionet** (chain id `61999`):
+
+| Contract | Address |
+|---|---|
+| `SentinelGuard` | [`0x623D42db647b66E4d8152d6a9C90937CeAD3a21d`](deployed.studionet.json) |
+| `DemoVault` | [`0x85dAf1A80AC8734a0f4236B03775332026739485`](deployed.studionet.json) |
+
+These match [`deployed.studionet.json`](deployed.studionet.json) and are already wired
+into [`frontend/src/config/network.js`](frontend/src/config/network.js) — just run the
+frontend below, no redeploy needed. If you redeploy your own copy (e.g. after changing
+the contract's storage layout), paste the two new addresses into that same file.
 
 ### Run the frontend
 
